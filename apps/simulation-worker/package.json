@@ -1,0 +1,29 @@
+{
+  "name": "@ai-world/simulation-worker",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-world/ai": "workspace:*",
+    "@ai-world/database": "workspace:*",
+    "@ai-world/game-engine": "workspace:*",
+    "@ai-world/shared": "workspace:*",
+    "bullmq": "^5.7.0",
+    "drizzle-orm": "^0.31.2",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.15.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}
