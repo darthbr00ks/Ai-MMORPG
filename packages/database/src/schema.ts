@@ -1,0 +1,346 @@
+import {
+  pgTable,
+  text,
+  integer,
+  real,
+  timestamp,
+  boolean,
+  jsonb,
+  pgEnum,
+  primaryKey,
+  uuid,
+} from 'drizzle-orm/pg-core';
+
+// Enums
+export const characterStatusEnum = pgEnum('character_status', [
+  'idle',
+  'working',
+  'traveling',
+  'conversing',
+  'sleeping',
+  'planning',
+]);
+
+export const moderationOutcomeEnum = pgEnum('moderation_outcome', [
+  'accepted',
+  'rejected',
+  'flagged',
+]);
+
+export const validationResultEnum = pgEnum('validation_result', [
+  'valid',
+  'rejected',
+  'fallback',
+]);
+
+export const memoryKindEnum = pgEnum('memory_kind', [
+  'episodic',
+  'relationship',
+  'strategic',
+]);
+
+export const conversationVisibilityEnum = pgEnum('conversation_visibility', [
+  'public',
+  'private',
+]);
+
+// Users
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  email: text('email').notNull().unique(),
+  emailVerified: timestamp('email_verified'),
+  image: text('image'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  role: text('role').default('player').notNull(),
+});
+
+// Auth.js sessions & accounts
+export const accounts = pgTable(
+  'accounts',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    provider: text('provider').notNull(),
+    providerAccountId: text('provider_account_id').notNull(),
+    refresh_token: text('refresh_token'),
+    access_token: text('access_token'),
+    expires_at: integer('expires_at'),
+    token_type: text('token_type'),
+    scope: text('scope'),
+    id_token: text('id_token'),
+    session_state: text('session_state'),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.provider, t.providerAccountId] }),
+  })
+);
+
+export const sessions = pgTable('sessions', {
+  sessionToken: text('session_token').primaryKey(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  expires: timestamp('expires').notNull(),
+});
+
+export const verificationTokens = pgTable(
+  'verification_tokens',
+  {
+    identifier: text('identifier').notNull(),
+    token: text('token').notNull(),
+    expires: timestamp('expires').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.identifier, t.token] }),
+  })
+);
+
+// Locations
+export const locations = pgTable('locations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  slug: text('slug').notNull().unique(),
+  description: text('description').notNull(),
+  connections: jsonb('connections').notNull().default('[]'), // array of location slugs
+});
+
+// Characters
+export const characters = pgTable('characters', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  age: integer('age').notNull(),
+  appearanceJson: jsonb('appearance_json').default('{}'),
+  background: text('background').notNull(),
+  personalityTraits: jsonb('personality_traits').notNull().default('[]'),
+  skills: jsonb('skills').notNull().default('[]'),
+  ambitions: jsonb('ambitions').notNull().default('[]'),
+  archetype: text('archetype').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// Character ownership (separate from character identity)
+export const characterOwnership = pgTable('character_ownership', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id),
+  acquiredAt: timestamp('acquired_at').defaultNow().notNull(),
+  active: boolean('active').notNull().default(true),
+});
+
+// Character state (physical)
+export const characterState = pgTable('character_state', {
+  characterId: uuid('character_id')
+    .primaryKey()
+    .references(() => characters.id),
+  locationId: uuid('location_id')
+    .notNull()
+    .references(() => locations.id),
+  health: integer('health').notNull().default(100),
+  fatigue: integer('fatigue').notNull().default(0),
+  status: characterStatusEnum('status').notNull().default('idle'),
+  travelEta: timestamp('travel_eta'),
+  travelDestinationId: uuid('travel_destination_id').references(
+    () => locations.id
+  ),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Wallets
+export const wallets = pgTable('wallets', {
+  characterId: uuid('character_id')
+    .primaryKey()
+    .references(() => characters.id),
+  balanceCents: integer('balance_cents').notNull().default(0),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Transactions (append-only ledger)
+export const transactions = pgTable('transactions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  fromCharacterId: uuid('from_character_id').references(() => characters.id),
+  toCharacterId: uuid('to_character_id').references(() => characters.id),
+  amountCents: integer('amount_cents').notNull(),
+  reason: text('reason').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// Items
+export const items = pgTable('items', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  category: text('category').notNull(),
+});
+
+// Inventory
+export const inventory = pgTable('inventory', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  itemId: uuid('item_id')
+    .notNull()
+    .references(() => items.id),
+  quantity: integer('quantity').notNull().default(0),
+});
+
+// Directives
+export const directives = pgTable('directives', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  userId: uuid('user_id').references(() => users.id),
+  text: text('text').notNull(),
+  submittedAt: timestamp('submitted_at').defaultNow().notNull(),
+  gameDay: integer('game_day').notNull(),
+  active: boolean('active').notNull().default(true),
+});
+
+// Game cycles
+export const gameCycles = pgTable('game_cycles', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  dayNumber: integer('day_number').notNull(),
+  startedAt: timestamp('started_at').defaultNow().notNull(),
+  endedAt: timestamp('ended_at'),
+});
+
+// Agent decisions
+export const agentDecisions = pgTable('agent_decisions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  gameCycleId: uuid('game_cycle_id')
+    .notNull()
+    .references(() => gameCycles.id),
+  contextSummary: jsonb('context_summary').notNull().default('{}'),
+  model: text('model').notNull(),
+  chosenAction: text('chosen_action').notNull(),
+  targetId: text('target_id'),
+  latencyMs: integer('latency_ms'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// Agent actions
+export const agentActions = pgTable('agent_actions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  decisionId: uuid('decision_id')
+    .notNull()
+    .references(() => agentDecisions.id),
+  actionType: text('action_type').notNull(),
+  payload: jsonb('payload').notNull().default('{}'),
+  validationResult: validationResultEnum('validation_result')
+    .notNull()
+    .default('valid'),
+  executedAt: timestamp('executed_at').defaultNow().notNull(),
+});
+
+// Game events
+export const gameEvents = pgTable('game_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  type: text('type').notNull(),
+  actorCharacterId: uuid('actor_character_id').references(() => characters.id),
+  targetCharacterId: uuid('target_character_id').references(
+    () => characters.id
+  ),
+  locationId: uuid('location_id').references(() => locations.id),
+  payload: jsonb('payload').notNull().default('{}'),
+  importance: real('importance').notNull().default(0.1),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// Phase 10+ tables (shape fixed now)
+export const relationships = pgTable('relationships', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterAId: uuid('character_a_id')
+    .notNull()
+    .references(() => characters.id),
+  characterBId: uuid('character_b_id')
+    .notNull()
+    .references(() => characters.id),
+  trust: integer('trust').notNull().default(0),
+  respect: integer('respect').notNull().default(0),
+  affection: integer('affection').notNull().default(0),
+  fear: integer('fear').notNull().default(0),
+  hostility: integer('hostility').notNull().default(0),
+  familiarity: integer('familiarity').notNull().default(0),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const conversations = pgTable('conversations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  locationId: uuid('location_id').references(() => locations.id),
+  startedAt: timestamp('started_at').defaultNow().notNull(),
+  endedAt: timestamp('ended_at'),
+  visibility: conversationVisibilityEnum('visibility')
+    .notNull()
+    .default('public'),
+});
+
+export const conversationMessages = pgTable('conversation_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id')
+    .notNull()
+    .references(() => conversations.id),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  content: text('content').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const memories = pgTable('memories', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  kind: memoryKindEnum('kind').notNull(),
+  content: text('content').notNull(),
+  importance: real('importance').notNull().default(0.5),
+  sourceEventId: uuid('source_event_id').references(() => gameEvents.id),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// Ops tables
+export const aiUsage = pgTable('ai_usage', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id').references(() => characters.id),
+  userId: uuid('user_id').references(() => users.id),
+  gameCycleId: uuid('game_cycle_id').references(() => gameCycles.id),
+  provider: text('provider').notNull(),
+  model: text('model').notNull(),
+  purpose: text('purpose').notNull(),
+  inputTokens: integer('input_tokens').notNull().default(0),
+  outputTokens: integer('output_tokens').notNull().default(0),
+  cacheReadTokens: integer('cache_read_tokens').notNull().default(0),
+  cacheWriteTokens: integer('cache_write_tokens').notNull().default(0),
+  latencyMs: integer('latency_ms'),
+  estimatedCostCents: real('estimated_cost_cents'),
+  success: boolean('success').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const moderationRecords = pgTable('moderation_records', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  directiveId: uuid('directive_id')
+    .notNull()
+    .references(() => directives.id),
+  outcome: moderationOutcomeEnum('outcome').notNull(),
+  reasonCategory: text('reason_category').notNull().default(''),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const auditLog = pgTable('audit_log', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  actor: text('actor').notNull(),
+  action: text('action').notNull(),
+  target: text('target'),
+  payload: jsonb('payload').default('{}'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});

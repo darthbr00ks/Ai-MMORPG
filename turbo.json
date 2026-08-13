@@ -1,0 +1,32 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [".env"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**", "!.next/cache/**", "dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "lint": {},
+    "test": {
+      "dependsOn": ["^build"],
+      "env": ["DATABASE_URL", "REDIS_URL"]
+    },
+    "test:live": {
+      "env": ["DATABASE_URL", "REDIS_URL", "ANTHROPIC_API_KEY", "AI_USE_LIVE"]
+    },
+    "db:generate": {},
+    "db:migrate": {
+      "env": ["DATABASE_URL"]
+    },
+    "db:seed": {
+      "env": ["DATABASE_URL"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

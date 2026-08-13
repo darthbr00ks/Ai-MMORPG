@@ -1,0 +1,117 @@
+import { z } from 'zod';
+
+export const DirectiveSchema = z.object({
+  text: z
+    .string()
+    .min(1, 'Directive cannot be empty')
+    .max(500, 'Directive must be 500 characters or fewer'),
+});
+
+export type DirectiveInput = z.infer<typeof DirectiveSchema>;
+
+export const CharacterStatusEnum = z.enum([
+  'idle',
+  'working',
+  'traveling',
+  'conversing',
+  'sleeping',
+  'planning',
+]);
+
+export type CharacterStatus = z.infer<typeof CharacterStatusEnum>;
+
+export const ModerationOutcomeEnum = z.enum([
+  'accepted',
+  'rejected',
+  'flagged',
+]);
+
+export type ModerationOutcome = z.infer<typeof ModerationOutcomeEnum>;
+
+export const ValidationResultEnum = z.enum(['valid', 'rejected', 'fallback']);
+
+export type ValidationResult = z.infer<typeof ValidationResultEnum>;
+
+export interface PersonalityTrait {
+  trait: string;
+  weight: number; // 0..1
+}
+
+export interface AgentDecisionContext {
+  characterId: string;
+  name: string;
+  background: string;
+  personalityTraits: PersonalityTrait[];
+  skills: string[];
+  ambitions: string[];
+  currentDirective: string | null;
+  currentLocation: string;
+  health: number;
+  fatigue: number;
+  status: CharacterStatus;
+  walletCents: number;
+  currentGoals: string[];
+  recentMemories: string[];
+  availableActions: string[];
+  visibleCharacters: string[];
+  gameCycleId: string;
+  gameDay: number;
+}
+
+export interface DialogueContext {
+  characterId: string;
+  name: string;
+  personalityTraits: PersonalityTrait[];
+  targetCharacterId: string;
+  targetName: string;
+  relationship: Record<string, number>;
+  topic: string;
+  gameCycleId: string;
+}
+
+export interface SummaryContext {
+  characterId: string;
+  events: Array<{ type: string; description: string; createdAt: Date }>;
+  gameCycleId: string;
+}
+
+export interface MemoryContext {
+  characterId: string;
+  recentEvents: string[];
+  existingMemories: string[];
+  gameCycleId: string;
+}
+
+export interface DialogueResult {
+  message: string;
+  emotionalTone: string;
+}
+
+export interface SummaryResult {
+  summary: string;
+}
+
+export interface MemoryResult {
+  extractedMemories: Array<{ content: string; importance: number }>;
+}
+
+export interface ModerationResult {
+  status: ModerationOutcome;
+  reason_category: string;
+}
+
+export const GameEventTypes = [
+  'CHARACTER_MOVED',
+  'JOB_COMPLETED',
+  'MONEY_EARNED',
+  'RELATIONSHIP_CHANGED',
+  'DIRECTIVE_SUBMITTED',
+  'DIRECTIVE_MODERATED',
+  'ACTION_EXECUTED',
+  'ACTION_REJECTED',
+  'CHARACTER_IDLE',
+  'SIMULATION_TICK_STARTED',
+  'SIMULATION_TICK_COMPLETED',
+] as const;
+
+export type GameEventType = (typeof GameEventTypes)[number];

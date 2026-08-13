@@ -1,0 +1,8 @@
+node_modules/
+.next/
+dist/
+*.js.map
+.turbo/
+.env
+.env.local
+*.tsbuildinfo
