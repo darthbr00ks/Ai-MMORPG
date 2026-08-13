@@ -236,19 +236,30 @@ export async function processTick(
 
       const latencyMs = Date.now() - startMs;
 
-      // Record AI usage (estimated cost for mock = 0)
+      // Real per-call usage/cost (§8) — MockProvider doesn't implement
+      // getLastCallUsage, so a missing implementation is zero cost, not
+      // an error. AnthropicProvider always reports it after a call.
+      const usage = provider.getLastCallUsage?.() ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCostCents: 0,
+      };
+      totalSpentCents += usage.estimatedCostCents;
+
       await db.insert(aiUsage).values({
         characterId: char.id,
         gameCycleId: cycleId,
         provider: config.providerName,
         model: config.modelName,
         purpose: 'decideAction',
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens,
+        cacheWriteTokens: usage.cacheWriteTokens,
         latencyMs,
-        estimatedCostCents: 0,
+        estimatedCostCents: usage.estimatedCostCents,
         success: aiSuccess,
         createdAt: new Date(),
       });
@@ -310,7 +321,15 @@ export async function processTick(
 
       // Execute valid actions
       if (validation.valid) {
-        await executeAction(db, char.id, decision, currentState, locationsBySlug, cycleId);
+        await executeAction(
+          db,
+          char.id,
+          decision,
+          currentState,
+          locationsBySlug,
+          cycleId,
+          config.gameDayRealSeconds
+        );
       } else {
         // Write rejected event
         await db.insert(gameEvents).values({
@@ -375,13 +394,24 @@ interface LocationInfo {
   connections: string[];
 }
 
+// A MOVE takes this many simulated hours, converted to real ms via the
+// game clock — never a hardcoded real-world constant. At the default
+// GAME_DAY_REAL_SECONDS=300 (dev), 2 simulated hours is 25 real seconds;
+// in production (86400s/day) it's 2 real hours, which is the intent.
+const MOVE_DURATION_GAME_HOURS = 2;
+
+function moveDurationMs(gameDayRealSeconds: number): number {
+  return (MOVE_DURATION_GAME_HOURS / 24) * gameDayRealSeconds * 1000;
+}
+
 async function executeAction(
   db: Db,
   characterId: string,
   decision: AgentDecision,
   state: { locationId: string; status: string },
   locations: LocationInfo[],
-  cycleId: string
+  cycleId: string,
+  gameDayRealSeconds: number
 ): Promise<void> {
   switch (decision.selected_action) {
     case 'IDLE': {
@@ -408,7 +438,7 @@ async function executeAction(
       const destLoc = locations.find((l) => l.slug === destSlug);
       if (!destLoc) return;
 
-      const travelEta = new Date(Date.now() + 30_000); // 30 seconds travel time
+      const travelEta = new Date(Date.now() + moveDurationMs(gameDayRealSeconds));
 
       await db
         .update(characterState)
