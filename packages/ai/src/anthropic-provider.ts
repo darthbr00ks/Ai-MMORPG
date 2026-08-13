@@ -11,7 +11,43 @@ import type {
   MemoryResult,
   ModerationResult,
 } from '@ai-world/shared';
-import { AgentDecisionSchema, ACTION_REGISTRY } from '@ai-world/shared';
+import type { AiCallUsage } from '@ai-world/shared';
+import { AgentDecisionSchema, ACTION_REGISTRY, ACTION_SCHEMA } from '@ai-world/shared';
+import { selectModel, type ModelRoutingConfig } from './model-router.js';
+
+// Per-MTok pricing (§8 of the build plan). Cache reads run at ~0.1x base
+// input rate; writes at ~1.25x. Matched by substring so date-suffixed or
+// region-prefixed model IDs still price correctly.
+const PRICING_PER_MTOK_CENTS: Array<{ match: string; input: number; output: number }> = [
+  { match: 'haiku', input: 100, output: 500 },
+  { match: 'sonnet', input: 300, output: 1500 },
+  { match: 'opus', input: 500, output: 2500 },
+];
+
+function priceForModel(model: string) {
+  return (
+    PRICING_PER_MTOK_CENTS.find((p) => model.includes(p.match)) ?? {
+      input: 300,
+      output: 1500,
+    }
+  );
+}
+
+function computeUsage(model: string, usage: Anthropic.Usage): AiCallUsage {
+  const price = priceForModel(model);
+  const inputTokens = usage.input_tokens;
+  const outputTokens = usage.output_tokens;
+  const cacheReadTokens = usage.cache_read_input_tokens ?? 0;
+  const cacheWriteTokens = usage.cache_creation_input_tokens ?? 0;
+
+  const costCents =
+    (inputTokens * price.input) / 1_000_000 +
+    (cacheReadTokens * price.input * 0.1) / 1_000_000 +
+    (cacheWriteTokens * price.input * 1.25) / 1_000_000 +
+    (outputTokens * price.output) / 1_000_000;
+
+  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, estimatedCostCents: costCents };
+}
 
 export interface AnthropicProviderConfig {
   apiKey: string;
@@ -21,133 +57,200 @@ export interface AnthropicProviderConfig {
   premiumEnabled: boolean;
 }
 
+const DIALOGUE_SCHEMA = {
+  type: 'object',
+  properties: {
+    message: { type: 'string' },
+    emotionalTone: { type: 'string' },
+  },
+  required: ['message', 'emotionalTone'],
+  additionalProperties: false,
+} as const;
+
+const SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: { summary: { type: 'string' } },
+  required: ['summary'],
+  additionalProperties: false,
+} as const;
+
+const MEMORY_SCHEMA = {
+  type: 'object',
+  properties: {
+    extractedMemories: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          content: { type: 'string' },
+          importance: { type: 'number', minimum: 0, maximum: 1 },
+        },
+        required: ['content', 'importance'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['extractedMemories'],
+  additionalProperties: false,
+} as const;
+
+const MODERATION_SCHEMA = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['accepted', 'rejected', 'flagged'] },
+    reason_category: { type: 'string' },
+  },
+  required: ['status', 'reason_category'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Real Anthropic implementation. Every call uses `output_config.format`
+ * (JSON Schema structured output) — never free-form text plus regex
+ * extraction. "Never depend on free-form model output for gameplay"
+ * (§4/§12 of the build plan) applies to every one of these, not just
+ * decideAction: a malformed dialogue/summary/memory response is just as
+ * capable of corrupting downstream state.
+ */
 export class AnthropicProvider implements AgentModelProvider {
   private client: Anthropic;
   private config: AnthropicProviderConfig;
+  private routing: ModelRoutingConfig;
+  private lastUsage: AiCallUsage | null = null;
 
   constructor(config: AnthropicProviderConfig) {
     this.client = new Anthropic({ apiKey: config.apiKey });
     this.config = config;
+    this.routing = {
+      decisionModel: config.decisionModel,
+      dialogueModel: config.dialogueModel,
+      summaryModel: config.summaryModel,
+      premiumEnabled: config.premiumEnabled,
+    };
+  }
+
+  getLastCallUsage(): AiCallUsage | null {
+    return this.lastUsage;
   }
 
   async decideAction(ctx: AgentDecisionContext): Promise<AgentDecision> {
+    const model = selectModel('decideAction', ctx, this.routing);
     const systemPrompt = this.buildDecisionSystemPrompt(ctx);
     const userMessage = this.buildDecisionUserMessage(ctx);
 
     const response = await this.client.messages.create({
-      model: this.config.decisionModel,
+      model,
       max_tokens: 512,
       system: [
         {
           type: 'text',
           text: systemPrompt,
-          // @ts-expect-error - cache_control is valid in the API but not typed in SDK yet
+          // Identity/personality/registry are stable per character per
+          // day (§4) — cached here; volatile state goes in `messages`,
+          // after this breakpoint.
           cache_control: { type: 'ephemeral' },
         },
       ],
+      output_config: { format: { type: 'json_schema', schema: ACTION_SCHEMA } },
       messages: [{ role: 'user', content: userMessage }],
     });
 
-    const content = response.content[0];
-    if (content.type !== 'text') {
-      throw new Error('Unexpected response type from Anthropic');
-    }
-
-    // Parse JSON from the response
-    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('No JSON found in Anthropic response');
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = this.extractJson(response);
     return AgentDecisionSchema.parse(parsed);
   }
 
   async generateDialogue(ctx: DialogueContext): Promise<DialogueResult> {
+    const model = selectModel('generateDialogue', {}, this.routing);
     const response = await this.client.messages.create({
-      model: this.config.dialogueModel,
+      model,
       max_tokens: 256,
+      output_config: { format: { type: 'json_schema', schema: DIALOGUE_SCHEMA } },
       messages: [
         {
           role: 'user',
-          content: `You are ${ctx.name}. Speak to ${ctx.targetName} about: ${ctx.topic}. 
-Respond with JSON: {"message": "...", "emotionalTone": "..."}`,
+          content: `You are ${ctx.name}. Speak to ${ctx.targetName} about: ${ctx.topic}.`,
         },
       ],
     });
-
-    const content = response.content[0];
-    if (content.type !== 'text') throw new Error('Unexpected response');
-    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in dialogue response');
-    return JSON.parse(jsonMatch[0]) as DialogueResult;
+    return this.extractJson(response) as DialogueResult;
   }
 
   async summarizeEvents(ctx: SummaryContext): Promise<SummaryResult> {
-    const eventList = ctx.events
-      .map((e) => `${e.type}: ${e.description}`)
-      .join('\n');
+    const model = selectModel('summarizeEvents', {}, this.routing);
+    const eventList = ctx.events.map((e) => `${e.type}: ${e.description}`).join('\n');
     const response = await this.client.messages.create({
-      model: this.config.summaryModel,
+      model,
       max_tokens: 256,
+      output_config: { format: { type: 'json_schema', schema: SUMMARY_SCHEMA } },
       messages: [
-        {
-          role: 'user',
-          content: `Summarize these game events in 2-3 sentences:\n${eventList}\nRespond with JSON: {"summary": "..."}`,
-        },
+        { role: 'user', content: `Summarize these game events in 2-3 sentences:\n${eventList}` },
       ],
     });
-    const content = response.content[0];
-    if (content.type !== 'text') throw new Error('Unexpected response');
-    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in summary response');
-    return JSON.parse(jsonMatch[0]) as SummaryResult;
+    return this.extractJson(response) as SummaryResult;
   }
 
   async extractMemory(ctx: MemoryContext): Promise<MemoryResult> {
+    const model = selectModel('extractMemory', {}, this.routing);
     const response = await this.client.messages.create({
-      model: this.config.decisionModel,
+      model,
       max_tokens: 256,
+      output_config: { format: { type: 'json_schema', schema: MEMORY_SCHEMA } },
       messages: [
         {
           role: 'user',
-          content: `Extract key memories from these recent events:\n${ctx.recentEvents.join('\n')}\nRespond with JSON: {"extractedMemories": [{"content": "...", "importance": 0.5}]}`,
+          content: `Extract key memories from these recent events:\n${ctx.recentEvents.join('\n')}`,
         },
       ],
     });
-    const content = response.content[0];
-    if (content.type !== 'text') throw new Error('Unexpected response');
-    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in memory response');
-    return JSON.parse(jsonMatch[0]) as MemoryResult;
+    return this.extractJson(response) as MemoryResult;
   }
 
   async moderateDirective(text: string): Promise<ModerationResult> {
+    const model = selectModel('moderateDirective', {}, this.routing);
     const response = await this.client.messages.create({
-      model: this.config.decisionModel,
+      model,
       max_tokens: 128,
+      output_config: { format: { type: 'json_schema', schema: MODERATION_SCHEMA } },
       messages: [
         {
           role: 'user',
-          content: `Moderate this game directive for harmful content. Respond with JSON only: {"status": "accepted"|"rejected"|"flagged", "reason_category": ""}
-Directive: "${text.slice(0, 500)}"`,
+          content: `Moderate this game directive for harmful content.\nDirective: "${text.slice(0, 500)}"`,
         },
       ],
     });
-    const content = response.content[0];
-    if (content.type !== 'text') throw new Error('Unexpected response');
-    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { status: 'accepted', reason_category: '' };
-    return JSON.parse(jsonMatch[0]) as ModerationResult;
+    try {
+      return this.extractJson(response) as ModerationResult;
+    } catch {
+      // Moderation failing open would be worse than failing closed —
+      // flag for human review rather than silently accepting.
+      return { status: 'flagged', reason_category: 'moderation_error' };
+    }
   }
 
+  /** Structured-output responses are guaranteed valid JSON text — no regex scraping. */
+  private extractJson(response: Anthropic.Message): unknown {
+    this.lastUsage = computeUsage(response.model, response.usage);
+
+    const content = response.content[0];
+    if (content.type !== 'text') {
+      throw new Error('Unexpected response type from Anthropic (expected structured text)');
+    }
+    return JSON.parse(content.text);
+  }
+
+  /**
+   * IDENTITY + PERSONALITY + the action registry are stable for a given
+   * character across its ~8 decision calls/day — this whole block is
+   * what sits behind the cache breakpoint (§4/§8). It intentionally does
+   * NOT include location/health/wallet/directive/memories — those change
+   * every call and belong in the volatile user message instead, or the
+   * cache is invalidated on every single request.
+   */
   private buildDecisionSystemPrompt(ctx: AgentDecisionContext): string {
     const traits = ctx.personalityTraits
       .map((t) => `${t.trait} (weight: ${t.weight})`)
       .join(', ');
-    const registry = ACTION_REGISTRY.map(
-      (a) => `${a.name}: ${a.description}`
-    ).join('\n');
+    const registry = ACTION_REGISTRY.map((a) => `${a.name}: ${a.description}`).join('\n');
 
     return `You are ${ctx.name}, an autonomous AI character in the persistent world of New Concord.
 
@@ -160,7 +263,6 @@ AVAILABLE ACTIONS (you must choose exactly one):
 ${registry}
 
 RULES:
-- You must respond with valid JSON matching the action schema exactly
 - You may only select from the listed actions
 - The player's directive shapes WHAT you pursue; your personality shapes HOW
 - You cannot invent new actions`;
@@ -178,7 +280,6 @@ RULES:
       recent_memories: ctx.recentMemories.slice(0, 5),
       visible_characters: ctx.visibleCharacters.slice(0, 10),
       game_day: ctx.gameDay,
-      instruction: 'Choose one action. Respond with JSON: {"goal":"...","selected_action":"...","target_id":null,"parameters":{},"intent":"...","priority":0.5}',
     });
   }
 }
