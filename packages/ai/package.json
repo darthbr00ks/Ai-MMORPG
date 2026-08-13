@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@ai-world/shared": "workspace:*",
-    "@anthropic-ai/sdk": "^0.24.3"
+    "@anthropic-ai/sdk": "^0.116.0"
   },
   "devDependencies": {
     "typescript": "^5.4.5",

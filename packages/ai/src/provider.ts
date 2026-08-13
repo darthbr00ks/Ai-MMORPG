@@ -8,6 +8,7 @@ import type {
   MemoryContext,
   MemoryResult,
   ModerationResult,
+  AiCallUsage,
 } from '@ai-world/shared';
 
 export interface AgentModelProvider {
@@ -16,4 +17,11 @@ export interface AgentModelProvider {
   summarizeEvents(ctx: SummaryContext): Promise<SummaryResult>;
   extractMemory(ctx: MemoryContext): Promise<MemoryResult>;
   moderateDirective(text: string): Promise<ModerationResult>;
+  /**
+   * Usage/cost for the most recently completed call on this provider
+   * instance. Optional so MockProvider isn't forced to fake it — callers
+   * that care about cost (the tick loop's ai_usage ledger + budget
+   * breaker, §8) should treat a missing implementation as zero-cost.
+   */
+  getLastCallUsage?(): AiCallUsage | null;
 }

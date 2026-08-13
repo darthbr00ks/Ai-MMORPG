@@ -100,6 +100,20 @@ export interface ModerationResult {
   reason_category: string;
 }
 
+/**
+ * Real per-call token/cost accounting (§8 of the build plan — "AI cost
+ * is a first-class metric"). Mock provider reports zeros (it's free);
+ * AnthropicProvider computes this from the SDK response's `usage` block
+ * and the model's per-MTok pricing.
+ */
+export interface AiCallUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estimatedCostCents: number;
+}
+
 export const GameEventTypes = [
   'CHARACTER_MOVED',
   'JOB_COMPLETED',

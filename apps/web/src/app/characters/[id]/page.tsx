@@ -2,6 +2,7 @@ import { getDb } from '@/lib/db';
 import { schema } from '@ai-world/database';
 import { eq, desc } from 'drizzle-orm';
 import DirectiveForm from '@/components/DirectiveForm';
+import { CharacterAvatar } from '@/components/CharacterAvatar';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,9 +86,12 @@ export default async function CharacterDetailPage({
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-start">
-        <div>
-          <h2 className="text-3xl font-bold">{char.name}</h2>
-          <p className="text-gray-400">Age {char.age} · {char.archetype}</p>
+        <div className="flex items-center gap-4">
+          <CharacterAvatar seed={char.id} size={72} className="shrink-0 rounded-full bg-gray-800" />
+          <div>
+            <h2 className="text-3xl font-bold">{char.name}</h2>
+            <p className="text-gray-400">Age {char.age} · {char.archetype}</p>
+          </div>
         </div>
         <span
           className={`text-sm px-3 py-1 rounded-full ${

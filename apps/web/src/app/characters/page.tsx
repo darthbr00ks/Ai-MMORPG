@@ -1,6 +1,7 @@
 import { getDb } from '@/lib/db';
 import { schema } from '@ai-world/database';
 import { eq } from 'drizzle-orm';
+import { CharacterAvatar } from '@/components/CharacterAvatar';
 
 export const dynamic = 'force-dynamic';
 
@@ -68,9 +69,12 @@ export default async function CharactersPage() {
               className="block bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-amber-600 transition-colors"
             >
               <div className="flex justify-between items-start mb-2">
-                <div>
-                  <h3 className="font-bold text-lg">{char.name}</h3>
-                  <p className="text-gray-400 text-sm">Age {char.age} · {char.archetype}</p>
+                <div className="flex items-center gap-3">
+                  <CharacterAvatar seed={char.id} size={48} className="shrink-0 rounded-full bg-gray-800" />
+                  <div>
+                    <h3 className="font-bold text-lg">{char.name}</h3>
+                    <p className="text-gray-400 text-sm">Age {char.age} · {char.archetype}</p>
+                  </div>
                 </div>
                 <span
                   className={`text-xs px-2 py-1 rounded ${

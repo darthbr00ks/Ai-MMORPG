@@ -15,3 +15,26 @@ export function validateDirective(text: string, maxChars = 500): DirectiveValida
   }
   return { valid: true };
 }
+
+/**
+ * One directive submission per game day (§3/§54 of the build plan).
+ * A character with no active directive yet (`activeDirectiveGameDay ===
+ * null`) may always submit. Otherwise, a new submission is only allowed
+ * once `currentGameDay` has advanced past the day the active directive
+ * was submitted on.
+ */
+export function canSubmitDirective(
+  activeDirectiveGameDay: number | null,
+  currentGameDay: number
+): DirectiveValidationResult {
+  if (activeDirectiveGameDay === null) {
+    return { valid: true };
+  }
+  if (currentGameDay > activeDirectiveGameDay) {
+    return { valid: true };
+  }
+  return {
+    valid: false,
+    reason: `A directive was already submitted for game day ${activeDirectiveGameDay}. Try again next game day.`,
+  };
+}

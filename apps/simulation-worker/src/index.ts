@@ -1,5 +1,5 @@
 import { loadConfig } from '@ai-world/shared';
-import { getDb } from '@ai-world/database';
+import { getDb, getWorldEpoch } from '@ai-world/database';
 import { MockProvider } from '@ai-world/ai';
 import { AnthropicProvider } from '@ai-world/ai';
 import { processTick } from './tick-processor.js';
@@ -23,7 +23,11 @@ async function main() {
       })
     : new MockProvider();
 
-  const cycleStartedAt = new Date();
+  // World epoch is persisted in game_cycles (day 0) — never a fresh
+  // in-memory Date — so the game day survives a worker restart and the
+  // web app can compute the same "today" independently.
+  const cycleStartedAt = await getWorldEpoch(db);
+  console.log(`[Worker] World epoch: ${cycleStartedAt.toISOString()}`);
   let tickCount = 0;
 
   const runTick = async () => {
