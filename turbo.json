@@ -19,10 +19,16 @@
     },
     "db:generate": {},
     "db:migrate": {
-      "env": ["DATABASE_URL"]
+      "env": ["DATABASE_URL"],
+      "cache": false
     },
     "db:seed": {
-      "env": ["DATABASE_URL"]
+      "env": ["DATABASE_URL"],
+      "cache": false
+    },
+    "db:fix-jsonb-double-encoding": {
+      "env": ["DATABASE_URL"],
+      "cache": false
     },
     "dev": {
       "cache": false,

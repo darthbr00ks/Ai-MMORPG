@@ -5,11 +5,21 @@ import {
   real,
   timestamp,
   boolean,
-  jsonb,
   pgEnum,
   primaryKey,
   uuid,
 } from 'drizzle-orm/pg-core';
+// Not drizzle-orm's built-in `jsonb` — see custom-jsonb.ts for why.
+// Deliberately WITHOUT the `.js` extension every other relative
+// import in this package uses: drizzle-kit's own schema loader (a
+// separate esbuild/CJS pipeline from this package's own `tsc`) fails
+// to resolve a `.js`-suffixed relative import here specifically —
+// `pnpm db:generate` throws MODULE_NOT_FOUND with it, works without
+// it. tsc under this package's own CommonJS/Node moduleResolution
+// (packages/database/tsconfig.json) is fine either way — confirmed by
+// building and by `db:generate` reporting a clean "no schema changes"
+// diff after this file switched from drizzle-orm's jsonb() to this.
+import { jsonbColumn as jsonb } from './custom-jsonb';
 
 // Enums
 export const characterStatusEnum = pgEnum('character_status', [
