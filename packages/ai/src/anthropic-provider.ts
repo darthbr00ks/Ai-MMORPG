@@ -155,7 +155,7 @@ export class AnthropicProvider implements AgentModelProvider {
       messages: [{ role: 'user', content: userMessage }],
     });
 
-    const parsed = this.extractJson(response);
+    const { parsed } = this.extractJson(response);
     return AgentDecisionSchema.parse(parsed);
   }
 
@@ -172,7 +172,7 @@ export class AnthropicProvider implements AgentModelProvider {
         },
       ],
     });
-    return this.extractJson(response) as DialogueResult;
+    return this.extractJson(response).parsed as DialogueResult;
   }
 
   async summarizeEvents(ctx: SummaryContext): Promise<SummaryResult> {
@@ -186,7 +186,12 @@ export class AnthropicProvider implements AgentModelProvider {
         { role: 'user', content: `Summarize these game events in 2-3 sentences:\n${eventList}` },
       ],
     });
-    return this.extractJson(response) as SummaryResult;
+    const { parsed, usage } = this.extractJson(response);
+    // Returned inline (not just via getLastCallUsage) — daily-report.ts
+    // calls this concurrently across characters; see provider.ts's doc
+    // comment on getLastCallUsage for why the shared-field read alone
+    // isn't safe under that concurrency.
+    return { ...(parsed as SummaryResult), usage };
   }
 
   async extractMemory(ctx: MemoryContext): Promise<MemoryResult> {
@@ -202,7 +207,10 @@ export class AnthropicProvider implements AgentModelProvider {
         },
       ],
     });
-    return this.extractJson(response) as MemoryResult;
+    const { parsed, usage } = this.extractJson(response);
+    // Returned inline — memory-extraction.ts calls this concurrently
+    // across characters; see the identical note in summarizeEvents above.
+    return { ...(parsed as MemoryResult), usage };
   }
 
   async moderateDirective(text: string): Promise<ModerationResult> {
@@ -219,7 +227,7 @@ export class AnthropicProvider implements AgentModelProvider {
       ],
     });
     try {
-      return this.extractJson(response) as ModerationResult;
+      return this.extractJson(response).parsed as ModerationResult;
     } catch {
       // Moderation failing open would be worse than failing closed —
       // flag for human review rather than silently accepting.
@@ -227,15 +235,25 @@ export class AnthropicProvider implements AgentModelProvider {
     }
   }
 
-  /** Structured-output responses are guaranteed valid JSON text — no regex scraping. */
-  private extractJson(response: Anthropic.Message): unknown {
-    this.lastUsage = computeUsage(response.model, response.usage);
+  /**
+   * Structured-output responses are guaranteed valid JSON text — no
+   * regex scraping. Returns usage alongside the parsed body (not just
+   * via the `this.lastUsage` side effect) so callers that need a
+   * concurrency-safe read — summarizeEvents, extractMemory — can use
+   * the inline value instead of the shared field. The side effect on
+   * `this.lastUsage` is kept for decideAction/generateDialogue/
+   * moderateDirective, which only ever run sequentially per character
+   * (see provider.ts's doc comment on getLastCallUsage).
+   */
+  private extractJson(response: Anthropic.Message): { parsed: unknown; usage: AiCallUsage } {
+    const usage = computeUsage(response.model, response.usage);
+    this.lastUsage = usage;
 
     const content = response.content[0];
     if (content.type !== 'text') {
       throw new Error('Unexpected response type from Anthropic (expected structured text)');
     }
-    return JSON.parse(content.text);
+    return { parsed: JSON.parse(content.text), usage };
   }
 
   /**

@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { and, desc, eq, gte, lt } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import { aiUsage, characters, gameCycles, gameEvents, memories } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
@@ -77,16 +77,60 @@ export async function extractDailyMemories(
 
   const allCharacters = await db.select({ id: characters.id }).from(characters);
 
-  for (const char of allCharacters) {
+  // One character's extraction is dominated by a single AI round-trip
+  // (network latency, not CPU) — running the whole roster sequentially
+  // means the day-boundary tick stalls for
+  // roster_size * round_trip_latency before the next tick can start.
+  // Every character's work here is independent (own events, own
+  // memories, own aiUsage row), so Promise.all fans them all out at
+  // once instead. Each character's whole body still runs inside its
+  // own try/catch, exactly as the old sequential loop did, so one
+  // character's failure can't take down another's — extractForCharacter
+  // never rejects, it always resolves to a result describing what
+  // happened.
+  const perCharacterResults = await Promise.all(
+    allCharacters.map((char) => extractForCharacter(char.id))
+  );
+
+  for (const result of perCharacterResults) {
+    if (result.hadEvents) charactersProcessed++;
+    memoriesWritten += result.memoriesWritten;
+    if (result.error) errors.push(result.error);
+  }
+
+  return { charactersProcessed, memoriesWritten, errors };
+
+  /**
+   * One character's full extraction pass: load the day's events, skip
+   * out early (zero cost) on a quiet day, call the provider, log
+   * ai_usage, and write out every extracted memory. Mirrors the
+   * sequential version's exact counting semantics even though it now
+   * runs concurrently with every other character's call:
+   *   - `hadEvents` (-> charactersProcessed) is decided the moment the
+   *     day's events are known, independent of whether the AI call or
+   *     the writes that follow it succeed.
+   *   - `memoriesWritten` reflects partial progress — if the Nth memory
+   *     insert throws, the first N-1 already written still count.
+   */
+  async function extractForCharacter(
+    characterId: string
+  ): Promise<{ hadEvents: boolean; memoriesWritten: number; error?: string }> {
+    let hadEvents = false;
+    let written = 0;
     try {
       const dayEvents = await db
         .select()
         .from(gameEvents)
         .where(
           and(
-            eq(gameEvents.actorCharacterId, char.id),
+            eq(gameEvents.actorCharacterId, characterId),
+            // gameDayRealTimeWindow is a half-open [start, end) window
+            // — day N's `end` IS day N+1's `start`. Using `lt` (not
+            // `lte`) here is what keeps a boundary-timestamp event
+            // from matching both this day's query and the next day's,
+            // which would extract the same event into two days' memories.
             gte(gameEvents.createdAt, dayStart),
-            lte(gameEvents.createdAt, dayEnd)
+            lt(gameEvents.createdAt, dayEnd)
           )
         )
         .orderBy(desc(gameEvents.importance))
@@ -95,19 +139,19 @@ export async function extractDailyMemories(
       // A quiet day (e.g. IDLE the whole time isn't even logged as
       // "quiet" — CHARACTER_IDLE events still count here) with truly
       // zero events costs zero tokens — skip the call entirely.
-      if (dayEvents.length === 0) continue;
-      charactersProcessed++;
+      if (dayEvents.length === 0) return { hadEvents: false, memoriesWritten: 0 };
+      hadEvents = true;
 
       const existingMemoryRows = await db
         .select()
         .from(memories)
-        .where(eq(memories.characterId, char.id))
+        .where(eq(memories.characterId, characterId))
         .orderBy(desc(memories.createdAt))
         .limit(MAX_EXISTING_MEMORIES_FOR_CONTEXT);
 
       const startMs = Date.now();
       const result = await provider.extractMemory({
-        characterId: char.id,
+        characterId,
         recentEvents: dayEvents.map(describeGameEvent),
         existingMemories: existingMemoryRows.map((m) => m.content),
         // Falls back to an empty string on the days that never got a
@@ -119,7 +163,13 @@ export async function extractDailyMemories(
       });
       const latencyMs = Date.now() - startMs;
 
-      const usage = provider.getLastCallUsage?.() ?? {
+      // Usage is read from the result itself, not provider.getLastCallUsage()
+      // — that method reflects one shared field on the provider
+      // instance, which is unsafe to read once multiple characters'
+      // calls are in flight concurrently (see provider.ts's doc
+      // comment on getLastCallUsage). extractMemory returns its own
+      // usage inline for exactly this reason.
+      const usage = result.usage ?? {
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
@@ -128,7 +178,7 @@ export async function extractDailyMemories(
       };
 
       await db.insert(aiUsage).values({
-        characterId: char.id,
+        characterId,
         // Nullable in schema for exactly this case — no row exists
         // for a day that completed without a tick ever landing in it.
         gameCycleId: completedCycle?.id ?? null,
@@ -154,22 +204,23 @@ export async function extractDailyMemories(
 
       for (const extracted of result.extractedMemories) {
         await db.insert(memories).values({
-          characterId: char.id,
+          characterId,
           kind: 'episodic',
           content: extracted.content,
           importance: extracted.importance,
           sourceEventId: representativeEventId,
           createdAt: new Date(),
         });
-        memoriesWritten++;
+        written++;
       }
+
+      return { hadEvents, memoriesWritten: written };
     } catch (err) {
-      errors.push(`Character ${char.id}: ${String(err)}`);
-      // Continue to the next character — one broken extraction never
-      // blocks the rest of the day's memory pass, mirroring the tick
-      // loop's own per-character isolation.
+      // Partial writes made before the failure still count — mirrors
+      // the sequential version, where memoriesWritten was incremented
+      // in the same per-memory loop a later statement could still throw
+      // out of.
+      return { hadEvents, memoriesWritten: written, error: `Character ${characterId}: ${String(err)}` };
     }
   }
-
-  return { charactersProcessed, memoriesWritten, errors };
 }

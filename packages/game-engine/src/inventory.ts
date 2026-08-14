@@ -1,6 +1,6 @@
 import { type Db } from '@ai-world/database';
 import { inventory } from '@ai-world/database';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 export interface InventoryMutationResult {
   success: boolean;
@@ -10,11 +10,17 @@ export interface InventoryMutationResult {
 
 /**
  * Add `quantity` of an item to a character's inventory, creating the
- * row on first contact. There's no unique constraint on
- * (characterId, itemId) at the DB level, so every mutation MUST go
- * through this lock-then-upsert path rather than a bare INSERT —
- * otherwise concurrent additions could create two rows for the same
- * character/item pair instead of one row with a summed quantity.
+ * row on first contact. Uses a single atomic `INSERT ... ON CONFLICT
+ * DO UPDATE` against the (characterId, itemId) unique constraint,
+ * rather than "SELECT ... FOR UPDATE, then INSERT-or-UPDATE" — that
+ * older pattern looked safe but wasn't: a `SELECT ... FOR UPDATE`
+ * against a row that doesn't exist yet locks nothing, so two
+ * concurrent first-time additions of the same item could both
+ * observe "no existing row" and both INSERT, producing two rows for
+ * the same character+item pair. The database-level unique constraint
+ * plus ON CONFLICT closes that gap structurally instead of relying on
+ * an application-level lock that only works once a row already
+ * exists.
  */
 export async function addToInventory(
   db: Db,
@@ -26,29 +32,16 @@ export async function addToInventory(
     return { success: false, reason: 'Quantity must be positive' };
   }
 
-  return db.transaction(async (tx) => {
-    const [existing] = await tx
-      .select()
-      .from(inventory)
-      .where(and(eq(inventory.characterId, characterId), eq(inventory.itemId, itemId)))
-      .for('update')
-      .limit(1);
+  const [row] = await db
+    .insert(inventory)
+    .values({ characterId, itemId, quantity })
+    .onConflictDoUpdate({
+      target: [inventory.characterId, inventory.itemId],
+      set: { quantity: sql`${inventory.quantity} + ${quantity}` },
+    })
+    .returning({ quantity: inventory.quantity });
 
-    if (existing) {
-      const [updated] = await tx
-        .update(inventory)
-        .set({ quantity: existing.quantity + quantity })
-        .where(eq(inventory.id, existing.id))
-        .returning({ quantity: inventory.quantity });
-      return { success: true, newQuantity: updated.quantity };
-    }
-
-    const [inserted] = await tx
-      .insert(inventory)
-      .values({ characterId, itemId, quantity })
-      .returning({ quantity: inventory.quantity });
-    return { success: true, newQuantity: inserted.quantity };
-  });
+  return { success: true, newQuantity: row.quantity };
 }
 
 /**
@@ -137,26 +130,22 @@ export async function transferItem(
       };
     }
 
-    const [toRow] = await tx
-      .select()
-      .from(inventory)
-      .where(and(eq(inventory.characterId, toCharacterId), eq(inventory.itemId, itemId)))
-      .for('update')
-      .limit(1);
-
     await tx
       .update(inventory)
       .set({ quantity: fromRow.quantity - quantity })
       .where(eq(inventory.id, fromRow.id));
 
-    if (toRow) {
-      await tx
-        .update(inventory)
-        .set({ quantity: toRow.quantity + quantity })
-        .where(eq(inventory.id, toRow.id));
-    } else {
-      await tx.insert(inventory).values({ characterId: toCharacterId, itemId, quantity });
-    }
+    // The recipient's row may not exist yet — same "SELECT FOR UPDATE
+    // locks nothing on a row that isn't there" gap addToInventory's
+    // doc comment describes, so this uses the same ON CONFLICT upsert
+    // rather than a SELECT-then-branch.
+    await tx
+      .insert(inventory)
+      .values({ characterId: toCharacterId, itemId, quantity })
+      .onConflictDoUpdate({
+        target: [inventory.characterId, inventory.itemId],
+        set: { quantity: sql`${inventory.quantity} + ${quantity}` },
+      });
 
     return { success: true };
   });

@@ -932,3 +932,172 @@ describe.skipIf(!DB_URL)('processTick — economy actions', () => {
     expect(eventTypeSet.has('MONEY_TRANSFERRED')).toBe(true);
   });
 });
+
+/**
+ * Regression test for a real bug found by code review: the per-tick
+ * `conversationInfoById` snapshot used to stay unchanged for the rest
+ * of the tick even after a conversation was ended mid-tick by the
+ * message cap, so a SECOND participant of the same conversation,
+ * processed later in the same tick, could still push it past the cap
+ * — an extra message plus a duplicate CONVERSATION_ENDED event for a
+ * conversation already closed. Fixed by deleting the entry from
+ * conversationInfoById the moment a conversation ends.
+ *
+ * Seeds a conversation already at 5 messages (one below the 6-message
+ * cap) and scripts BOTH participants to CONTINUE_CONVERSATION in the
+ * same tick — whichever is processed first pushes it to 6 and ends
+ * it; the other must see it as gone, not write a 7th message.
+ */
+describe.skipIf(!DB_URL)('processTick — conversation cap is not exceeded when both participants continue in one tick', () => {
+  let client: ReturnType<typeof postgres>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  let locationId: string;
+  let characterAId: string;
+  let characterBId: string;
+  let conversationId: string;
+
+  beforeAll(async () => {
+    client = postgres(DB_URL!);
+    db = drizzle(client, { schema });
+
+    const [location] = await db
+      .insert(schema.locations)
+      .values({
+        name: 'Conversation Cap Test Square',
+        slug: `conversation-cap-test-square-${Date.now()}`,
+        description: 'A test location',
+        connections: [],
+      })
+      .returning({ id: schema.locations.id });
+    locationId = location.id;
+
+    async function makeCharacter(name: string): Promise<string> {
+      const [character] = await db
+        .insert(schema.characters)
+        .values({
+          name,
+          age: 30,
+          background: 'A character created to test the conversation message cap.',
+          personalityTraits: [],
+          skills: [],
+          ambitions: [],
+          archetype: 'socialite',
+        })
+        .returning({ id: schema.characters.id });
+      await db.insert(schema.characterState).values({
+        characterId: character.id,
+        locationId,
+        health: 100,
+        fatigue: 0,
+        status: 'idle',
+      });
+      await db.insert(schema.wallets).values({ characterId: character.id, balanceCents: 1000 });
+      return character.id;
+    }
+
+    characterAId = await makeCharacter('Conversation Cap Test A');
+    characterBId = await makeCharacter('Conversation Cap Test B');
+
+    const [conversation] = await db
+      .insert(schema.conversations)
+      .values({
+        locationId,
+        participantIds: [characterAId, characterBId],
+        visibility: 'public',
+      })
+      .returning({ id: schema.conversations.id });
+    conversationId = conversation.id;
+
+    // 5 messages already — one more from EITHER participant hits the
+    // 6-message cap.
+    for (let i = 0; i < 5; i++) {
+      await db.insert(schema.conversationMessages).values({
+        conversationId,
+        characterId: i % 2 === 0 ? characterAId : characterBId,
+        content: `Message ${i + 1}`,
+      });
+    }
+  });
+
+  afterAll(async () => {
+    const bothIds = [characterAId, characterBId];
+    const ownDecisions = await db
+      .select({ id: schema.agentDecisions.id })
+      .from(schema.agentDecisions)
+      .where(inArray(schema.agentDecisions.characterId, bothIds));
+    const decisionIds = ownDecisions.map((d) => d.id);
+
+    await db.delete(schema.conversationMessages).where(eq(schema.conversationMessages.conversationId, conversationId));
+    await db.delete(schema.conversations).where(eq(schema.conversations.id, conversationId));
+    await db.delete(schema.relationships).where(
+      or(
+        and(eq(schema.relationships.characterAId, characterAId), eq(schema.relationships.characterBId, characterBId)),
+        and(eq(schema.relationships.characterAId, characterBId), eq(schema.relationships.characterBId, characterAId))
+      )
+    );
+    await db.delete(schema.gameEvents).where(inArray(schema.gameEvents.actorCharacterId, bothIds));
+    await db.delete(schema.aiUsage).where(inArray(schema.aiUsage.characterId, bothIds));
+    if (decisionIds.length > 0) {
+      await db.delete(schema.agentActions).where(inArray(schema.agentActions.decisionId, decisionIds));
+    }
+    await db.delete(schema.agentDecisions).where(inArray(schema.agentDecisions.characterId, bothIds));
+    await db.delete(schema.wallets).where(inArray(schema.wallets.characterId, bothIds));
+    await db.delete(schema.characterState).where(inArray(schema.characterState.characterId, bothIds));
+    await db.delete(schema.characters).where(inArray(schema.characters.id, bothIds));
+    await db.delete(schema.locations).where(eq(schema.locations.id, locationId));
+    await client.end();
+  });
+
+  it('writes exactly one more message and exactly one CONVERSATION_ENDED event, not two', async () => {
+    const continueDecision: AgentDecision = {
+      goal: 'keep talking',
+      selected_action: 'CONTINUE_CONVERSATION',
+      target_id: conversationId,
+      parameters: {},
+      intent: 'responding',
+      priority: 0.5,
+    };
+    const script = new Map<string, AgentDecision>([
+      [characterAId, continueDecision],
+      [characterBId, continueDecision],
+    ]);
+
+    const result = await processTick(
+      db,
+      new ScriptedProvider(script),
+      {
+        gameDayRealSeconds: 300,
+        simulationTickSeconds: 10,
+        dailyBudgetCents: 500,
+        providerName: 'mock',
+        modelName: 'mock',
+      },
+      new Date()
+    );
+
+    expect(result.errors.some((e) => e.includes(characterAId) || e.includes(characterBId))).toBe(false);
+
+    const messages = await db
+      .select()
+      .from(schema.conversationMessages)
+      .where(eq(schema.conversationMessages.conversationId, conversationId));
+    expect(messages.length).toBe(6); // 5 seeded + exactly 1 more, never 7
+
+    const [conversationRow] = await db
+      .select()
+      .from(schema.conversations)
+      .where(eq(schema.conversations.id, conversationId));
+    expect(conversationRow.endedAt).not.toBeNull();
+
+    const endedEvents = await db
+      .select()
+      .from(schema.gameEvents)
+      .where(
+        and(
+          eq(schema.gameEvents.type, 'CONVERSATION_ENDED'),
+          inArray(schema.gameEvents.actorCharacterId, [characterAId, characterBId])
+        )
+      );
+    expect(endedEvents.length).toBe(1); // never 2
+  });
+});

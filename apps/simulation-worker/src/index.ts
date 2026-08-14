@@ -80,14 +80,21 @@ async function main() {
       console.error(`[Worker] Tick ${tickId} FATAL error (tick survived):`, err);
     }
 
-    // Schedule next tick. Paused (running down a queue of manual
-    // ticks) always re-checks on the short poll cadence, whether or
-    // not more are queued, so the next one runs promptly; running
-    // normally uses the configured interval divided by the admin
-    // console's speed multiplier (default 1x — unchanged behavior).
-    const nextDelayMs = control.paused
+    // Schedule next tick. Re-fetch control rather than reusing the
+    // value captured at the top of this call — processTick can run
+    // for a while (AI round-trips), and an admin Pause clicked while
+    // it was in flight must be reflected in the NEXT delay, not
+    // discovered a whole tick interval late (in prod, that's up to
+    // 30 minutes before Pause visibly takes effect). Paused (running
+    // down a queue of manual ticks) always re-checks on the short
+    // poll cadence, whether or not more are queued, so the next one
+    // runs promptly; running normally uses the configured interval
+    // divided by the admin console's speed multiplier (default 1x —
+    // unchanged behavior).
+    const currentControl = await getOrCreateSimulationControl(db);
+    const nextDelayMs = currentControl.paused
       ? PAUSED_POLL_INTERVAL_MS
-      : (config.SIMULATION_TICK_SECONDS * 1000) / control.speedMultiplier;
+      : (config.SIMULATION_TICK_SECONDS * 1000) / currentControl.speedMultiplier;
     setTimeout(runTick, nextDelayMs);
   };
 
