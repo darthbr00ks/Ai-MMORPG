@@ -1,8 +1,15 @@
 import { loadConfig } from '@ai-world/shared';
-import { getDb, getWorldEpoch } from '@ai-world/database';
+import { getDb, getWorldEpoch, getOrCreateSimulationControl, claimPendingManualTick } from '@ai-world/database';
 import { MockProvider } from '@ai-world/ai';
 import { AnthropicProvider } from '@ai-world/ai';
 import { processTick } from './tick-processor.js';
+
+// While paused, check back on this cadence rather than the (possibly
+// long, in prod up to 30 minutes) normal tick interval — Resume / Run
+// 1 Tick / Run 1 Day from the admin console (§13's Simulation Test
+// Mode) need to feel responsive, not wait out whatever interval was
+// in effect when Pause was pressed.
+const PAUSED_POLL_INTERVAL_MS = 2000;
 
 async function main() {
   const config = loadConfig();
@@ -31,6 +38,22 @@ async function main() {
   let tickCount = 0;
 
   const runTick = async () => {
+    // Simulation Test Mode (§13): a single control row, polled once
+    // per loop iteration, is all the coordination this needs — see
+    // packages/database/src/simulation-control.ts for why a DB row
+    // rather than a queue.
+    const control = await getOrCreateSimulationControl(db);
+
+    if (control.paused) {
+      const claimedManualTick = await claimPendingManualTick(db);
+      if (!claimedManualTick) {
+        // Paused with nothing queued — nothing to do this iteration.
+        setTimeout(runTick, PAUSED_POLL_INTERVAL_MS);
+        return;
+      }
+      console.log('[Worker] Paused — running one manually-queued tick...');
+    }
+
     tickCount++;
     const tickId = `tick-${tickCount}`;
     console.log(`[Worker] ${tickId} starting...`);
@@ -57,8 +80,15 @@ async function main() {
       console.error(`[Worker] Tick ${tickId} FATAL error (tick survived):`, err);
     }
 
-    // Schedule next tick
-    setTimeout(runTick, config.SIMULATION_TICK_SECONDS * 1000);
+    // Schedule next tick. Paused (running down a queue of manual
+    // ticks) always re-checks on the short poll cadence, whether or
+    // not more are queued, so the next one runs promptly; running
+    // normally uses the configured interval divided by the admin
+    // console's speed multiplier (default 1x — unchanged behavior).
+    const nextDelayMs = control.paused
+      ? PAUSED_POLL_INTERVAL_MS
+      : (config.SIMULATION_TICK_SECONDS * 1000) / control.speedMultiplier;
+    setTimeout(runTick, nextDelayMs);
   };
 
   // Initial delay then start ticking
