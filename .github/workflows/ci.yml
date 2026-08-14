@@ -1,0 +1,113 @@
+name: CI
+
+# Every merge to `main` in this repo's history so far has depended on
+# a human (or an agent) remembering to run `pnpm turbo run typecheck
+# lint test` locally before pushing — nothing on GitHub's side ever
+# verified that actually happened. This is the automated backstop:
+# same three checks, run against a real Postgres service container (not
+# skipped, the way the integration test suites silently skip
+# themselves locally without a DATABASE_URL — see each *.test.ts's
+# `describe.skipIf(!DB_URL)`), on every push to main and every PR.
+#
+# Pair this with a branch protection rule on `main` requiring this
+# workflow to pass before merge — the workflow alone only reports
+# status, it doesn't block anything by itself.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same PR/branch supersedes whatever's still
+# running for the old one — no reason to finish checking a commit that
+# was already replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: typecheck, lint, test
+    runs-on: ubuntu-latest
+
+    # Real Postgres, not sqlite-in-memory or mocked-out queries — this
+    # codebase's whole atomicity story (SELECT ... FOR UPDATE, ON
+    # CONFLICT, transactions, deadlock behavior) only means anything
+    # against the real thing, and most of the regression tests from
+    # the code-review hardening pass exist specifically to race real
+    # concurrent transactions against a real database.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ai_world_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Real connection to the service container above. AUTH_SECRET is
+      # a fixed CI-only placeholder, never a real secret — config.ts
+      # only requires it be non-empty (Auth.js needs SOME value to
+      # boot), nothing in this workflow ever exercises real auth
+      # against it. AI_USE_LIVE stays false (the config default) so no
+      # ANTHROPIC_API_KEY is needed — MockProvider is what every test
+      # in this suite runs against, same as local dev without live AI
+      # explicitly opted into.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/ai_world_ci
+      AUTH_SECRET: ci-placeholder-not-a-real-secret
+      GAME_DAY_REAL_SECONDS: '300'
+      SIMULATION_TICK_SECONDS: '10'
+      DIRECTIVE_MAX_CHARACTERS: '500'
+      DEFAULT_STARTING_CURRENCY_CENTS: '10000'
+      AI_DAILY_BUDGET_CENTS: '500'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm before setup-node's cache: 'pnpm' option, which shells out
+      # to `pnpm store path` and fails if pnpm isn't on PATH yet.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        run: pnpm db:migrate
+
+      # Most integration tests seed their own fixtures in beforeAll and
+      # don't need this, but tick-integration.test.ts's economy-actions
+      # case looks up the seeded "market" location by slug (matching
+      # how a real deploy always runs seed once after migrate) rather
+      # than creating its own — this step exists to match that, not
+      # because most of the suite needs it.
+      - name: Seed database
+        run: pnpm db:seed
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      # Root package.json's own "test" script already sets
+      # --concurrency=1 — see docs/architecture.md's Phase 15 note on
+      # why: apps/web's and apps/simulation-worker's integration tests
+      # are separate OS processes under turbo's normal parallelism,
+      # and both hit this same real DATABASE_URL concurrently if
+      # allowed to run side by side.
+      - name: Test
+        run: pnpm test
