@@ -283,13 +283,19 @@ ${registry}
 RULES:
 - You may only select from the listed actions
 - The player's directive shapes WHAT you pursue; your personality shapes HOW
-- You cannot invent new actions`;
+- You cannot invent new actions
+- A MOVE's target_id must be one of the exact slugs in this message's move_destinations_available — anything else is rejected and wastes the turn`;
   }
 
   private buildDecisionUserMessage(ctx: AgentDecisionContext): string {
     return JSON.stringify({
       directive: ctx.currentDirective || 'No directive — act on your own ambitions',
       current_location: ctx.currentLocation,
+      // Location connections are one-directional (being reachable FROM
+      // somewhere does not imply a path back) — this is the exhaustive,
+      // authoritative list of valid MOVE target_ids from here. A MOVE
+      // to anything else is rejected by the engine and wastes the call.
+      move_destinations_available: ctx.connectedLocationSlugs,
       health: ctx.health,
       fatigue: ctx.fatigue,
       status: ctx.status,
