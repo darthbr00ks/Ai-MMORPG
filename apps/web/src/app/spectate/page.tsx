@@ -1,4 +1,5 @@
 import EventFeed from '@/components/EventFeed';
+import WorldMap from '@/components/WorldMap';
 import { getDb } from '@/lib/db';
 import { schema } from '@ai-world/database';
 import { eq } from 'drizzle-orm';
@@ -50,6 +51,8 @@ export default async function SpectatePage() {
           Open broadcast view ↗
         </a>
       </div>
+      <WorldMap />
+
       <div className="grid md:grid-cols-3 gap-6">
         <div className="md:col-span-2">
           <h3 className="text-lg font-semibold mb-3">Live Events</h3>
