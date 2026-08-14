@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { loadRootEnv } from './load-env.js';
 
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
@@ -48,6 +49,12 @@ let _config: AppConfig | null = null;
 
 export function loadConfig(): AppConfig {
   if (_config) return _config;
+  // Next.js loads apps/web's .env automatically; plain Node entry
+  // points (the simulation worker) don't, so load it here before
+  // parsing process.env. A no-op if the vars are already set (e.g.
+  // real production env injection) — dotenv never overwrites existing
+  // process.env values by default.
+  loadRootEnv(process.cwd());
   const result = envSchema.safeParse(process.env);
   if (!result.success) {
     console.error('Invalid environment configuration:');
