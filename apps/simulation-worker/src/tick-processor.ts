@@ -117,9 +117,17 @@ export async function processTick(
         continue;
       }
 
-      // Check if traveling and not arrived yet
+      // Check if traveling and not arrived yet. Per §12 of the build
+      // plan, a traveling character does NOT get an AI decision call
+      // every tick — but the tick engine still correctly considered
+      // and handled them, so they count toward processedCharacters.
+      // (Previously this `continue` skipped the processedCount++ at
+      // the bottom of the loop entirely, so any tick with a character
+      // mid-travel silently under-reported its own processed count —
+      // a false signal for anything monitoring "did this tick cover
+      // everyone".)
       if (state.status === 'traveling' && state.travelEta && state.travelEta > new Date()) {
-        // Still traveling — skip AI call
+        processedCount++;
         continue;
       }
 

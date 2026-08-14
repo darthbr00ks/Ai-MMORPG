@@ -2,6 +2,11 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import * as schema from './schema.js';
 import { eq } from 'drizzle-orm';
+import { loadRootEnv } from '@ai-world/shared';
+
+// A plain Node script (unlike apps/web) — load the repo-root .env
+// before reading process.env.DATABASE_URL below.
+loadRootEnv(process.cwd());
 
 const LOCATIONS = [
   {

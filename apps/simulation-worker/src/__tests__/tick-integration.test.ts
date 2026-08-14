@@ -175,3 +175,118 @@ describe.skipIf(!DB_URL)('processTick — full directive-to-event path', () => {
     expect(usage[0].purpose).toBe('decideAction');
   });
 });
+
+/**
+ * Regression test for a real bug caught while watching the live worker:
+ * a character mid-travel (status='traveling', travelEta in the future)
+ * is correctly skipped for an AI decision call (§12 — no decision call
+ * every tick while traveling), but `processTick`'s returned
+ * `processedCharacters` count used to silently drop them via a bare
+ * `continue` before the counter was incremented. That made the count
+ * an inaccurate "did this tick cover everyone" signal any time a
+ * character was traveling — which, in a 20-character world, is most
+ * ticks. This asserts a traveling character still counts as processed
+ * and, distinctly, generates no new decision while still traveling.
+ */
+describe.skipIf(!DB_URL)('processTick — traveling characters count as processed', () => {
+  let client: ReturnType<typeof postgres>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  let characterId: string;
+  let locationId: string;
+  let userId: string;
+
+  beforeAll(async () => {
+    client = postgres(DB_URL!);
+    db = drizzle(client, { schema });
+
+    const [location] = await db
+      .insert(schema.locations)
+      .values({
+        name: 'Traveling Test Square',
+        slug: `traveling-test-square-${Date.now()}`,
+        description: 'A test location',
+        connections: [],
+      })
+      .returning({ id: schema.locations.id });
+    locationId = location.id;
+
+    const [user] = await db
+      .insert(schema.users)
+      .values({ email: `traveling-test-${Date.now()}@example.com` })
+      .returning({ id: schema.users.id });
+    userId = user.id;
+
+    const [character] = await db
+      .insert(schema.characters)
+      .values({
+        name: 'Traveling Test Character',
+        age: 30,
+        background: 'A character created to test the mid-travel skip path.',
+        personalityTraits: [],
+        skills: [],
+        ambitions: [],
+        archetype: 'wealth-seeker',
+      })
+      .returning({ id: schema.characters.id });
+    characterId = character.id;
+
+    await db.insert(schema.characterOwnership).values({ characterId, userId, active: true });
+
+    // Mid-travel with an ETA an hour from now — must not resolve during the test.
+    await db.insert(schema.characterState).values({
+      characterId,
+      locationId,
+      health: 100,
+      fatigue: 0,
+      status: 'traveling',
+      travelEta: new Date(Date.now() + 60 * 60 * 1000),
+      travelDestinationId: locationId,
+    });
+
+    await db.insert(schema.wallets).values({ characterId, balanceCents: 1000 });
+  });
+
+  afterAll(async () => {
+    await db.delete(schema.characterState).where(eq(schema.characterState.characterId, characterId));
+    await db.delete(schema.wallets).where(eq(schema.wallets.characterId, characterId));
+    await db.delete(schema.characterOwnership).where(eq(schema.characterOwnership.characterId, characterId));
+    await db.delete(schema.characters).where(eq(schema.characters.id, characterId));
+    await db.delete(schema.locations).where(eq(schema.locations.id, locationId));
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await client.end();
+  });
+
+  it('counts the traveling character in processedCharacters without giving it a decision', async () => {
+    const before = await db
+      .select()
+      .from(schema.agentDecisions)
+      .where(eq(schema.agentDecisions.characterId, characterId));
+    expect(before.length).toBe(0);
+
+    const result = await processTick(
+      db,
+      new MockProvider(),
+      {
+        gameDayRealSeconds: 300,
+        simulationTickSeconds: 10,
+        dailyBudgetCents: 500,
+        providerName: 'mock',
+        modelName: 'mock',
+      },
+      new Date()
+    );
+
+    // The tick engine considered this character and correctly chose
+    // not to call the AI for it — that's still "processed", not "not
+    // reached". processedCharacters must be at least 1 to prove this
+    // character (and not just others) tripped the counter.
+    expect(result.processedCharacters).toBeGreaterThanOrEqual(1);
+    expect(result.errors.some((e) => e.includes(characterId))).toBe(false);
+
+    const after = await db
+      .select()
+      .from(schema.agentDecisions)
+      .where(eq(schema.agentDecisions.characterId, characterId));
+    expect(after.length).toBe(0);
+  });
+});

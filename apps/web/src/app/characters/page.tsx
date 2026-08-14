@@ -47,7 +47,12 @@ async function getCharacters(): Promise<CharacterRow[]> {
         eq(schema.characters.id, schema.wallets.characterId)
       )
       .orderBy(schema.characters.name);
-  } catch {
+  } catch (err) {
+    // Swallowing this silently (the previous behavior) makes a real
+    // outage — bad DATABASE_URL, DB down, missing env — look identical
+    // to "no characters yet" in the UI. Surface it in server logs at
+    // minimum so it's debuggable instead of a silent empty grid.
+    console.error('[characters] failed to load character list:', err);
     return [];
   }
 }
