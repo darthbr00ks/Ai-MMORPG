@@ -94,4 +94,25 @@ describe.skipIf(!DB_URL)('jsonb columns store real objects/arrays, not double-en
     const [event] = await db.select().from(schema.gameEvents).where(eq(schema.gameEvents.id, eventId));
     expect(event.payload).toEqual({ intent: 'testing', goal: 'verify jsonb storage', nested: { ok: true } });
   });
+
+  it('self-heals reads of a not-yet-migrated (still double-encoded) row', async () => {
+    // Reproduces exactly what the OLD, pre-fix code path used to
+    // store: a JSON.stringify'd value handed to postgres.js for a
+    // jsonb column gets serialized a SECOND time by postgres.js's own
+    // jsonb serializer (confirmed empirically during the original
+    // root-cause investigation — this is not a synthetic shortcut,
+    // it's the real bug reproduced on demand). Simulates a row this
+    // fix's write path never touched — e.g. one from before
+    // pnpm db:fix-jsonb-double-encoding was ever run.
+    const legacyValue = { legacy: true, value: 42 };
+    await client`update game_events set payload = ${JSON.stringify(legacyValue)} where id = ${eventId}`;
+
+    const [rawRow] = await client<{ typeofCol: string }[]>`
+      select jsonb_typeof(payload) as "typeofCol" from game_events where id = ${eventId}
+    `;
+    expect(rawRow.typeofCol).toBe('string'); // confirms the row really is double-encoded
+
+    const [event] = await db.select().from(schema.gameEvents).where(eq(schema.gameEvents.id, eventId));
+    expect(event.payload).toEqual(legacyValue); // but drizzle's own read path still recovers it correctly
+  });
 });

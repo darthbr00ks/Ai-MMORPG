@@ -7,6 +7,7 @@ import {
   boolean,
   pgEnum,
   primaryKey,
+  unique,
   uuid,
 } from 'drizzle-orm/pg-core';
 // Not drizzle-orm's built-in `jsonb` — see custom-jsonb.ts for why.
@@ -190,20 +191,42 @@ export const items = pgTable('items', {
   // discovery — BUY_ITEM pays this; SELL_ITEM pays a fraction of it
   // (see MARKET_SELL_MULTIPLIER in tick-processor.ts), so buying and
   // reselling immediately is always a loss, same as any NPC shop.
-  basePriceCents: integer('base_price_cents').notNull(),
+  // The `.default(0)` is a migration-safety placeholder, never a real
+  // price — this column was added via ALTER TABLE (migration 0003) to
+  // an already-existing `items` table; a NOT NULL column with no
+  // default fails outright on any deploy path where `items` rows
+  // already exist by the time that migration runs (this repo's own
+  // migrate-then-seed order never hits that, but a migration should
+  // not depend on deploy ordering it doesn't enforce). seed.ts always
+  // sets a real value on insert; nothing reads this default in
+  // practice.
+  basePriceCents: integer('base_price_cents').notNull().default(0),
 });
 
 // Inventory
-export const inventory = pgTable('inventory', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  characterId: uuid('character_id')
-    .notNull()
-    .references(() => characters.id),
-  itemId: uuid('item_id')
-    .notNull()
-    .references(() => items.id),
-  quantity: integer('quantity').notNull().default(0),
-});
+export const inventory = pgTable(
+  'inventory',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    characterId: uuid('character_id')
+      .notNull()
+      .references(() => characters.id),
+    itemId: uuid('item_id')
+      .notNull()
+      .references(() => items.id),
+    quantity: integer('quantity').notNull().default(0),
+  },
+  (t) => ({
+    // packages/game-engine/src/inventory.ts's addToInventory/
+    // transferItem rely on this to make their upsert
+    // (SELECT ... FOR UPDATE, then INSERT-or-UPDATE) actually safe —
+    // without it, a SELECT FOR UPDATE against a character+item pair
+    // with no existing row locks nothing, so two concurrent
+    // first-time additions of the same item can both observe "no
+    // row" and both INSERT, producing two rows for the same pair.
+    characterItemUnique: unique('inventory_character_id_item_id_unique').on(t.characterId, t.itemId),
+  })
+);
 
 // Directives
 export const directives = pgTable('directives', {

@@ -80,6 +80,18 @@ describe.skipIf(!DB_URL)('generateDailyReports', () => {
         importance: 0.3,
         createdAt: new Date(dayStart.getTime() + 2000),
       },
+      // Exactly on the boundary — belongs to the NEXT day
+      // (gameDayRealTimeWindow is half-open [start, end)), so this
+      // must NOT be counted in this day's report. Regression coverage
+      // for a real off-by-one found by code review — asserted via
+      // eventCount below.
+      {
+        type: 'CHARACTER_IDLE',
+        actorCharacterId: characterId,
+        payload: {},
+        importance: 0.1,
+        createdAt: dayEnd,
+      },
     ]);
   });
 
@@ -114,6 +126,8 @@ describe.skipIf(!DB_URL)('generateDailyReports', () => {
     expect(reportRows.length).toBe(1);
     expect(reportRows[0].gameDay).toBe(dayNumber);
     expect(reportRows[0].summary.length).toBeGreaterThan(0);
+    // 2, never 3 — the third seeded event sits exactly on the day
+    // boundary and belongs to the next day.
     expect(reportRows[0].eventCount).toBe(2);
 
     const usageRows = await db
@@ -161,5 +175,122 @@ describe.skipIf(!DB_URL)('generateDailyReports', () => {
       gameDayRealSeconds
     );
     expect(result).toEqual({ charactersProcessed: 0, reportsWritten: 0, errors: [] });
+  });
+});
+
+/**
+ * Regression coverage for the identical hazard covered in
+ * memory-extraction.test.ts's matching describe block — see that
+ * file's doc comment for the full rationale. generateDailyReports was
+ * parallelized the same way and summarizeEvents now returns usage
+ * inline (SummaryResult.usage) for the same reason.
+ */
+describe.skipIf(!DB_URL)('generateDailyReports — concurrent per-character usage attribution', () => {
+  let client: ReturnType<typeof postgres>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  let characterAId: string;
+  let characterBId: string;
+  const dayNumber = 987655;
+  const dayStart = new Date('2000-02-01T00:00:00Z');
+  const gameDayRealSeconds = 86400;
+  const cycleStartedAt = new Date(dayStart.getTime() - dayNumber * gameDayRealSeconds * 1000);
+
+  beforeAll(async () => {
+    client = postgres(DB_URL!);
+    db = drizzle(client, { schema });
+
+    async function makeCharacter(name: string): Promise<string> {
+      const [character] = await db
+        .insert(schema.characters)
+        .values({
+          name,
+          age: 40,
+          background: 'A character created to test concurrent usage attribution.',
+          personalityTraits: [],
+          skills: [],
+          ambitions: [],
+          archetype: 'wealth-seeker',
+        })
+        .returning({ id: schema.characters.id });
+      return character.id;
+    }
+
+    characterAId = await makeCharacter('Report Usage Race Test A');
+    characterBId = await makeCharacter('Report Usage Race Test B');
+
+    await db.insert(schema.gameEvents).values([
+      {
+        type: 'MONEY_EARNED',
+        actorCharacterId: characterAId,
+        payload: {},
+        importance: 0.5,
+        createdAt: new Date(dayStart.getTime() + 1000),
+      },
+      {
+        type: 'MONEY_EARNED',
+        actorCharacterId: characterBId,
+        payload: {},
+        importance: 0.5,
+        createdAt: new Date(dayStart.getTime() + 1000),
+      },
+    ]);
+  });
+
+  afterAll(async () => {
+    const bothIds = [characterAId, characterBId];
+    for (const id of bothIds) {
+      await db.delete(schema.dailyReports).where(eq(schema.dailyReports.characterId, id));
+      await db.delete(schema.aiUsage).where(eq(schema.aiUsage.characterId, id));
+      await db.delete(schema.gameEvents).where(eq(schema.gameEvents.actorCharacterId, id));
+      await db.delete(schema.characters).where(eq(schema.characters.id, id));
+    }
+    await client.end();
+  });
+
+  it("attributes each character's own cost even when the other's call resolves first", async () => {
+    const costByCharacter: Record<string, number> = {
+      [characterAId]: 15,
+      [characterBId]: 25,
+    };
+
+    const racyProvider = {
+      async summarizeEvents(ctx: { characterId: string }) {
+        // Character A is called first but resolves last — the
+        // interleaving that would expose a shared-field race.
+        const delayMs = ctx.characterId === characterAId ? 30 : 0;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        return {
+          summary: `summary for ${ctx.characterId}`,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            estimatedCostCents: costByCharacter[ctx.characterId],
+          },
+        };
+      },
+      // Deliberately NOT implementing getLastCallUsage — proves
+      // generateDailyReports no longer depends on it for this call.
+    };
+
+    const result = await generateDailyReports(
+      db,
+      racyProvider as never,
+      dayNumber,
+      'mock',
+      'mock',
+      cycleStartedAt,
+      gameDayRealSeconds
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.charactersProcessed).toBe(2);
+    expect(result.reportsWritten).toBe(2);
+
+    const usageA = await db.select().from(schema.aiUsage).where(eq(schema.aiUsage.characterId, characterAId));
+    const usageB = await db.select().from(schema.aiUsage).where(eq(schema.aiUsage.characterId, characterBId));
+    expect(usageA[0].estimatedCostCents).toBeCloseTo(15);
+    expect(usageB[0].estimatedCostCents).toBeCloseTo(25);
   });
 });

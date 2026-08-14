@@ -737,15 +737,15 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
       // Earn wages: 50-200 cents per tick
       const wages = 50 + Math.floor(Math.random() * 150);
 
-      const [wallet] = await db
-        .select()
-        .from(wallets)
-        .where(eq(wallets.characterId, characterId))
-        .limit(1);
-
-      if (wallet) {
-        await creditWallet(db, characterId, wages, 'Work wages');
-      }
+      // The event log must describe what actually happened — writing
+      // MONEY_EARNED regardless of whether the credit succeeded would
+      // let the event log (and everything built from it: daily
+      // reports, memories) claim income a character's wallet never
+      // received. Every seeded character always has a wallet, so this
+      // only guards a currently-unreachable-in-practice edge case,
+      // but the event write is now conditioned on the credit actually
+      // happening rather than assumed.
+      const credit = await creditWallet(db, characterId, wages, 'Work wages');
 
       // Increase fatigue
       const [cs] = await db
@@ -765,14 +765,16 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
           .where(eq(characterState.characterId, characterId));
       }
 
-      await db.insert(gameEvents).values({
-        type: 'MONEY_EARNED',
-        actorCharacterId: characterId,
-        locationId: state.locationId,
-        payload: { amount_cents: wages, intent: decision.intent },
-        importance: 0.3,
-        createdAt: new Date(),
-      });
+      if (credit.success) {
+        await db.insert(gameEvents).values({
+          type: 'MONEY_EARNED',
+          actorCharacterId: characterId,
+          locationId: state.locationId,
+          payload: { amount_cents: wages, intent: decision.intent },
+          importance: 0.3,
+          createdAt: new Date(),
+        });
+      }
       break;
     }
 
@@ -930,6 +932,17 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
           importance: 0.1,
           createdAt: new Date(),
         });
+
+        // Both participants' decision contexts and worldState.
+        // activeConversationIds were built from this same pre-tick
+        // Map snapshot — if the OTHER participant is also processed
+        // later in this tick, their (already-validated, already-
+        // built-context) CONTINUE_CONVERSATION would otherwise still
+        // find this entry present and write an 8th message plus a
+        // second CONVERSATION_ENDED for a conversation already
+        // closed. Deleting it here makes the `if (!info) return;`
+        // guard above catch that on the next lookup, same tick.
+        conversationInfoById.delete(conversationId);
       }
       break;
     }

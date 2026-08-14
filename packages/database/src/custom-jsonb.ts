@@ -18,16 +18,25 @@ import { customType } from 'drizzle-orm/pg-core';
  *     consumer (psql, `jsonb_typeof()`, a future admin query, an
  *     external BI tool) and a correctness bug in its own right.
  *
- * toDriver/fromDriver are both pass-through: postgres.js serializes a
- * raw JS value to jsonb correctly on its own (confirmed empirically —
- * passing the object directly stores real jsonb; passing a
- * pre-stringified value double-encodes), and it already deserializes
- * jsonb columns back to real JS values on the way out (it registers
- * its own wire-format parser for the jsonb OID). There is nothing
- * left for either side of this mapping to do.
+ * toDriver is pass-through: postgres.js serializes a raw JS value to
+ * jsonb correctly on its own (confirmed empirically — passing the
+ * object directly stores real jsonb; passing a pre-stringified value
+ * double-encodes). Every NEW write through this column type is
+ * correct from here on.
  *
- * Existing rows written before this fix are still double-encoded —
- * see fix-jsonb-double-encoding.ts for the one-off data migration.
+ * fromDriver is NOT a bare pass-through, deliberately: existing rows
+ * written before this fix are still double-encoded, and the one-off
+ * data migration (fix-jsonb-double-encoding.ts) is a separate,
+ * manually-invoked script — not part of `db:migrate`, so a database
+ * can easily be running this fixed code against still-corrupted data
+ * (e.g. this fix gets deployed before someone remembers to run the
+ * migration script). A correctly-stored jsonb value already arrives
+ * here as a real object/array/etc. (postgres.js decodes it); only a
+ * not-yet-migrated row arrives as a `string`, so parsing exactly
+ * mirrors drizzle-orm's own original (if double-applied) defensive
+ * behavior — this makes reads self-healing regardless of migration
+ * timing, without reintroducing the double-encoding on write that
+ * caused the bug in the first place.
  */
 export const jsonbColumn = customType<{ data: unknown; driverData: unknown }>({
   dataType() {
@@ -37,6 +46,17 @@ export const jsonbColumn = customType<{ data: unknown; driverData: unknown }>({
     return value;
   },
   fromDriver(value) {
-    return value;
+    if (typeof value !== 'string') return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      // Not actually double-encoded JSON — a column truly meant to
+      // hold a plain string would end up here too. Return as-is
+      // rather than throw; every column this type is used for today
+      // is documented (schema.ts) to hold an array/object, never a
+      // legitimate scalar string, so this branch is not expected to
+      // be reachable in practice.
+      return value;
+    }
   },
 });

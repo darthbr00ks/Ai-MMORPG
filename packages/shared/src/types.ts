@@ -119,10 +119,24 @@ export interface DialogueResult {
 
 export interface SummaryResult {
   summary: string;
+  // Per-call usage, returned inline rather than fetched afterward via
+  // provider.getLastCallUsage() — see AgentModelProvider's doc comment
+  // for why: summarizeEvents is called once per character per day
+  // rollover, and the caller (daily-report.ts) runs those calls
+  // concurrently across characters. A provider that tracked usage as
+  // shared instance state (one `lastUsage` field, overwritten by
+  // whichever call finishes last) would silently mis-attribute cost
+  // between characters under that concurrency. Optional so a provider
+  // that only ever runs sequentially (or doesn't track cost, like
+  // MockProvider) isn't forced to populate it.
+  usage?: AiCallUsage;
 }
 
 export interface MemoryResult {
   extractedMemories: Array<{ content: string; importance: number }>;
+  // See SummaryResult.usage — extractMemory has the identical
+  // concurrent-per-character calling pattern in memory-extraction.ts.
+  usage?: AiCallUsage;
 }
 
 export interface ModerationResult {

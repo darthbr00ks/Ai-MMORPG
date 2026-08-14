@@ -24,15 +24,37 @@ export async function transferMoney(
   if (amountCents <= 0) {
     return { success: false, reason: 'Amount must be positive' };
   }
+  if (fromCharacterId === toCharacterId) {
+    return { success: false, reason: 'Cannot transfer to yourself' };
+  }
+
+  // Lock both rows in a CANONICAL order — sorted by id, independent of
+  // which one is "from" and which is "to" — not caller-argument order.
+  // Locking in argument order looks consistent per-call but isn't
+  // consistent ACROSS calls: two concurrent transfers going opposite
+  // directions between the same two characters (A pays B, B pays A)
+  // would lock A-then-B in one transaction and B-then-A in the other,
+  // a real deadlock one of them has to lose. Same rationale as
+  // relationship-engine.ts's canonicalizeCharacterPair.
+  const [lowId, highId] =
+    fromCharacterId < toCharacterId ? [fromCharacterId, toCharacterId] : [toCharacterId, fromCharacterId];
 
   return db.transaction(async (tx) => {
-    // Lock both rows in a consistent order to avoid deadlocks
-    const [fromWallet] = await tx
+    const [lowWallet] = await tx
       .select()
       .from(wallets)
-      .where(eq(wallets.characterId, fromCharacterId))
+      .where(eq(wallets.characterId, lowId))
       .for('update')
       .limit(1);
+    const [highWallet] = await tx
+      .select()
+      .from(wallets)
+      .where(eq(wallets.characterId, highId))
+      .for('update')
+      .limit(1);
+
+    const fromWallet = fromCharacterId === lowId ? lowWallet : highWallet;
+    const toWallet = toCharacterId === lowId ? lowWallet : highWallet;
 
     if (!fromWallet) {
       return { success: false, reason: `No wallet for character ${fromCharacterId}` };
@@ -43,14 +65,6 @@ export async function transferMoney(
         reason: `Insufficient funds: has ${fromWallet.balanceCents}, needs ${amountCents}`,
       };
     }
-
-    const [toWallet] = await tx
-      .select()
-      .from(wallets)
-      .where(eq(wallets.characterId, toCharacterId))
-      .for('update')
-      .limit(1);
-
     if (!toWallet) {
       return { success: false, reason: `No wallet for character ${toCharacterId}` };
     }

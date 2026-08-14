@@ -9,7 +9,16 @@ import type {
   MemoryContext,
   MemoryResult,
   ModerationResult,
+  AiCallUsage,
 } from '@ai-world/shared';
+
+const ZERO_USAGE: AiCallUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  estimatedCostCents: 0,
+};
 
 /**
  * MockProvider: deterministic canned responses for testing.
@@ -143,6 +152,7 @@ export class MockProvider implements AgentModelProvider {
     const count = ctx.events.length;
     return {
       summary: `Character participated in ${count} events this cycle.`,
+      usage: ZERO_USAGE,
     };
   }
 
@@ -152,6 +162,7 @@ export class MockProvider implements AgentModelProvider {
         content: e,
         importance: 0.5,
       })),
+      usage: ZERO_USAGE,
     };
   }
 

@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import { and, desc, eq, gte, lt } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import { aiUsage, characters, dailyReports, gameCycles, gameEvents } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
@@ -58,35 +58,71 @@ export async function generateDailyReports(
 
   const allCharacters = await db.select({ id: characters.id }).from(characters);
 
-  for (const char of allCharacters) {
+  // Same rationale as extractDailyMemories' parallel rewrite: each
+  // character's report is dominated by one AI round-trip and touches
+  // no other character's rows (own events, own dailyReports row keyed
+  // by characterId+gameDay), so there's nothing sequential about this
+  // loop worth paying for — fan every character out with Promise.all
+  // instead of stalling the day-boundary tick for
+  // roster_size * round_trip_latency.
+  const perCharacterResults = await Promise.all(
+    allCharacters.map((char) => generateForCharacter(char.id))
+  );
+
+  for (const result of perCharacterResults) {
+    if (result.processed) charactersProcessed++;
+    if (result.written) reportsWritten++;
+    if (result.error) errors.push(result.error);
+  }
+
+  return { charactersProcessed, reportsWritten, errors };
+
+  /**
+   * One character's full report pass: skip idempotently if a report
+   * already exists for this day, skip (zero cost) on a quiet day,
+   * otherwise call the provider and write the report + ai_usage row.
+   * `processed` mirrors the sequential version's charactersProcessed
+   * bump — set only once dayEvents is known to be non-empty, same as
+   * before, just now decided independently per character instead of in
+   * a shared loop variable.
+   */
+  async function generateForCharacter(
+    characterId: string
+  ): Promise<{ processed: boolean; written: boolean; error?: string }> {
+    let processed = false;
     try {
       const [existingReport] = await db
         .select({ id: dailyReports.id })
         .from(dailyReports)
-        .where(and(eq(dailyReports.characterId, char.id), eq(dailyReports.gameDay, completedDayNumber)))
+        .where(and(eq(dailyReports.characterId, characterId), eq(dailyReports.gameDay, completedDayNumber)))
         .limit(1);
-      if (existingReport) continue;
+      if (existingReport) return { processed: false, written: false };
 
       const dayEvents = await db
         .select()
         .from(gameEvents)
         .where(
           and(
-            eq(gameEvents.actorCharacterId, char.id),
+            eq(gameEvents.actorCharacterId, characterId),
+            // gameDayRealTimeWindow is a half-open [start, end) window
+            // — day N's `end` IS day N+1's `start`. Using `lt` (not
+            // `lte`) here is what keeps a boundary-timestamp event
+            // from matching both this day's query and the next day's,
+            // which would summarize the same event into two reports.
             gte(gameEvents.createdAt, dayStart),
-            lte(gameEvents.createdAt, dayEnd)
+            lt(gameEvents.createdAt, dayEnd)
           )
         )
         .orderBy(desc(gameEvents.importance))
         .limit(MAX_EVENTS_PER_CHARACTER_PER_DAY);
 
       // Nothing happened — no report to write, no tokens spent.
-      if (dayEvents.length === 0) continue;
-      charactersProcessed++;
+      if (dayEvents.length === 0) return { processed: false, written: false };
+      processed = true;
 
       const startMs = Date.now();
       const result = await provider.summarizeEvents({
-        characterId: char.id,
+        characterId,
         events: dayEvents.map((e) => ({
           type: e.type,
           description: describeGameEvent(e),
@@ -96,7 +132,13 @@ export async function generateDailyReports(
       });
       const latencyMs = Date.now() - startMs;
 
-      const usage = provider.getLastCallUsage?.() ?? {
+      // Usage is read from the result itself, not
+      // provider.getLastCallUsage() — see the identical note in
+      // memory-extraction.ts's extractForCharacter: that method
+      // reflects one shared field on the provider instance, unsafe to
+      // read once multiple characters' calls are in flight
+      // concurrently, which is exactly what this Promise.all does.
+      const usage = result.usage ?? {
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
@@ -105,7 +147,7 @@ export async function generateDailyReports(
       };
 
       await db.insert(aiUsage).values({
-        characterId: char.id,
+        characterId,
         gameCycleId: completedCycle?.id ?? null,
         provider: providerName,
         model: modelName,
@@ -121,19 +163,23 @@ export async function generateDailyReports(
       });
 
       await db.insert(dailyReports).values({
-        characterId: char.id,
+        characterId,
         gameDay: completedDayNumber,
         summary: result.summary,
         eventCount: dayEvents.length,
         createdAt: new Date(),
       });
-      reportsWritten++;
+
+      return { processed: true, written: true };
     } catch (err) {
-      errors.push(`Character ${char.id}: ${String(err)}`);
       // One character's report failing never blocks the rest of the
       // day's reports, same isolation principle as the tick loop.
+      // `processed` only flips to true above, after dayEvents is known
+      // non-empty — a failure before that point (e.g. the existingReport
+      // or dayEvents query itself) must not count as processed, exactly
+      // matching the sequential version where charactersProcessed++
+      // only ran after that same check.
+      return { processed, written: false, error: `Character ${characterId}: ${String(err)}` };
     }
   }
-
-  return { charactersProcessed, reportsWritten, errors };
 }

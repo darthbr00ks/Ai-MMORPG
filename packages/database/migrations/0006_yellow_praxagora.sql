@@ -1,0 +1,2 @@
+ALTER TABLE "items" ALTER COLUMN "base_price_cents" SET DEFAULT 0;--> statement-breakpoint
+ALTER TABLE "inventory" ADD CONSTRAINT "inventory_character_id_item_id_unique" UNIQUE("character_id","item_id");
