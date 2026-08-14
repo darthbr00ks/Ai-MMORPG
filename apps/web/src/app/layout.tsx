@@ -20,6 +20,7 @@ export default function RootLayout({
             <a href="/" className="hover:text-amber-400">Dashboard</a>
             <a href="/characters" className="hover:text-amber-400">Characters</a>
             <a href="/spectate" className="hover:text-amber-400">Spectate</a>
+            <a href="/admin" className="hover:text-amber-400">Admin</a>
           </div>
         </nav>
         <main className="max-w-6xl mx-auto px-6 py-8">{children}</main>

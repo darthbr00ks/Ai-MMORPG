@@ -216,6 +216,20 @@ export const gameCycles = pgTable('game_cycles', {
   endedAt: timestamp('ended_at'),
 });
 
+// Phase 15: Simulation Test Mode (§13) — a single row the worker
+// polls each iteration and the admin console reads/writes. Not a
+// queue/event system; the worker already owns its own setTimeout
+// loop, this just tells it whether to run this iteration and how many
+// manually-queued ticks are owed. `id` is always the literal string
+// 'default' — there is exactly one simulation, so exactly one row.
+export const simulationControl = pgTable('simulation_control', {
+  id: text('id').primaryKey().default('default'),
+  paused: boolean('paused').notNull().default(false),
+  speedMultiplier: real('speed_multiplier').notNull().default(1),
+  pendingManualTicks: integer('pending_manual_ticks').notNull().default(0),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 // Agent decisions
 export const agentDecisions = pgTable('agent_decisions', {
   id: uuid('id').primaryKey().defaultRandom(),
