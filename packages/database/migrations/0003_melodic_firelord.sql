@@ -1,0 +1,1 @@
+ALTER TABLE "items" ADD COLUMN "base_price_cents" integer NOT NULL;

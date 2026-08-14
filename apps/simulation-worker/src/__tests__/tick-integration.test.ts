@@ -652,3 +652,283 @@ describe.skipIf(!DB_URL)('processTick — recentMemories reaches the decision co
     expect(ctx?.recentMemories).toContain(memoryContent);
   });
 });
+
+/**
+ * A provider whose decision for each character is scripted in
+ * advance, keyed by characterId — needed for the economy test below,
+ * which puts several characters through several different actions
+ * (BUY_ITEM, SELL_ITEM, GIVE_ITEM, TRANSFER_MONEY) in a single tick
+ * and needs each one to do a SPECIFIC thing, not MockProvider's
+ * generic heuristics. Any character not in the script IDLEs.
+ */
+class ScriptedProvider extends MockProvider {
+  constructor(private readonly scriptByCharacterId: Map<string, AgentDecision>) {
+    super();
+  }
+
+  override async decideAction(ctx: AgentDecisionContext): Promise<AgentDecision> {
+    return (
+      this.scriptByCharacterId.get(ctx.characterId) ?? {
+        goal: 'wait',
+        selected_action: 'IDLE',
+        target_id: null,
+        parameters: {},
+        intent: 'not scripted for this test',
+        priority: 0.1,
+      }
+    );
+  }
+}
+
+/**
+ * Phase 12 (§6): BUY_ITEM/SELL_ITEM/GIVE_ITEM/TRANSFER_MONEY. BUY/SELL
+ * are gated to the "market" location by slug (see
+ * action-validator.ts's MARKET_LOCATION_SLUG) — that's hardcoded, not
+ * data-driven, so this test reuses the real seeded "market" location
+ * rather than creating its own (locations.slug is unique; a second row
+ * with the same slug isn't possible). This means the test DOES depend
+ * on `pnpm db:seed` having been run against DATABASE_URL, same as the
+ * documented developer workflow (§15's acceptance checklist) — fails
+ * with a clear error rather than silently skipping if it hasn't.
+ */
+describe.skipIf(!DB_URL)('processTick — economy actions', () => {
+  let client: ReturnType<typeof postgres>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  let marketLocationId: string;
+  let itemId: string;
+  let buyerId: string;
+  let sellerId: string;
+  let giverId: string;
+  let giveRecipientId: string;
+  let senderId: string;
+  let moneyRecipientId: string;
+  let allCharacterIds: string[];
+
+  const ITEM_PRICE_CENTS = 100;
+
+  beforeAll(async () => {
+    client = postgres(DB_URL!);
+    db = drizzle(client, { schema });
+
+    const [marketLocation] = await db
+      .select()
+      .from(schema.locations)
+      .where(eq(schema.locations.slug, 'market'))
+      .limit(1);
+    if (!marketLocation) {
+      throw new Error(
+        'processTick — economy actions requires a seeded "market" location. Run `pnpm db:seed` against DATABASE_URL before running this test.'
+      );
+    }
+    marketLocationId = marketLocation.id;
+
+    const [item] = await db
+      .insert(schema.items)
+      .values({ name: 'Economy Test Widget', category: 'test', basePriceCents: ITEM_PRICE_CENTS })
+      .returning({ id: schema.items.id });
+    itemId = item.id;
+
+    async function makeCharacter(name: string, walletCents: number): Promise<string> {
+      const [character] = await db
+        .insert(schema.characters)
+        .values({
+          name,
+          age: 30,
+          background: 'A character created to test Phase 12 economy actions.',
+          personalityTraits: [],
+          skills: [],
+          ambitions: [],
+          archetype: 'wealth-seeker',
+        })
+        .returning({ id: schema.characters.id });
+      await db.insert(schema.characterState).values({
+        characterId: character.id,
+        locationId: marketLocationId,
+        health: 100,
+        fatigue: 0,
+        status: 'idle',
+      });
+      await db.insert(schema.wallets).values({ characterId: character.id, balanceCents: walletCents });
+      return character.id;
+    }
+
+    buyerId = await makeCharacter('Economy Test Buyer', 1000);
+    sellerId = await makeCharacter('Economy Test Seller', 0);
+    giverId = await makeCharacter('Economy Test Giver', 0);
+    giveRecipientId = await makeCharacter('Economy Test Give Recipient', 0);
+    senderId = await makeCharacter('Economy Test Sender', 1000);
+    moneyRecipientId = await makeCharacter('Economy Test Money Recipient', 0);
+    allCharacterIds = [buyerId, sellerId, giverId, giveRecipientId, senderId, moneyRecipientId];
+
+    // Seller and giver need inventory to sell/give BEFORE the tick —
+    // seeded directly, not through an action, since setting up test
+    // fixtures isn't itself the thing under test.
+    await db.insert(schema.inventory).values([
+      { characterId: sellerId, itemId, quantity: 5 },
+      { characterId: giverId, itemId, quantity: 5 },
+    ]);
+  });
+
+  afterAll(async () => {
+    const ownDecisions = await db
+      .select({ id: schema.agentDecisions.id })
+      .from(schema.agentDecisions)
+      .where(inArray(schema.agentDecisions.characterId, allCharacterIds));
+    const decisionIds = ownDecisions.map((d) => d.id);
+
+    await db.delete(schema.relationships).where(
+      or(
+        ...allCharacterIds.flatMap((a) =>
+          allCharacterIds.map((b) =>
+            and(eq(schema.relationships.characterAId, a), eq(schema.relationships.characterBId, b))
+          )
+        )
+      )
+    );
+    await db.delete(schema.gameEvents).where(inArray(schema.gameEvents.actorCharacterId, allCharacterIds));
+    await db.delete(schema.aiUsage).where(inArray(schema.aiUsage.characterId, allCharacterIds));
+    if (decisionIds.length > 0) {
+      await db.delete(schema.agentActions).where(inArray(schema.agentActions.decisionId, decisionIds));
+    }
+    await db.delete(schema.agentDecisions).where(inArray(schema.agentDecisions.characterId, allCharacterIds));
+    await db.delete(schema.transactions).where(
+      or(
+        inArray(schema.transactions.fromCharacterId, allCharacterIds),
+        inArray(schema.transactions.toCharacterId, allCharacterIds)
+      )
+    );
+    await db.delete(schema.inventory).where(inArray(schema.inventory.characterId, allCharacterIds));
+    await db.delete(schema.wallets).where(inArray(schema.wallets.characterId, allCharacterIds));
+    await db.delete(schema.characterState).where(inArray(schema.characterState.characterId, allCharacterIds));
+    await db.delete(schema.characters).where(inArray(schema.characters.id, allCharacterIds));
+    await db.delete(schema.items).where(eq(schema.items.id, itemId));
+    await client.end();
+  });
+
+  it('executes BUY_ITEM, SELL_ITEM, GIVE_ITEM, and TRANSFER_MONEY end to end', async () => {
+    const script = new Map<string, AgentDecision>([
+      [
+        buyerId,
+        {
+          goal: 'stock up',
+          selected_action: 'BUY_ITEM',
+          target_id: itemId,
+          parameters: { quantity: 3 },
+          intent: 'buying widgets',
+          priority: 0.5,
+        },
+      ],
+      [
+        sellerId,
+        {
+          goal: 'raise cash',
+          selected_action: 'SELL_ITEM',
+          target_id: itemId,
+          parameters: { quantity: 2 },
+          intent: 'selling widgets',
+          priority: 0.5,
+        },
+      ],
+      [
+        giverId,
+        {
+          goal: 'help a friend',
+          selected_action: 'GIVE_ITEM',
+          target_id: giveRecipientId,
+          parameters: { itemId, quantity: 2 },
+          intent: 'sharing widgets',
+          priority: 0.5,
+        },
+      ],
+      [
+        senderId,
+        {
+          goal: 'help a friend',
+          selected_action: 'TRANSFER_MONEY',
+          target_id: moneyRecipientId,
+          parameters: { amountCents: 400 },
+          intent: 'lending a hand',
+          priority: 0.5,
+        },
+      ],
+    ]);
+
+    const result = await processTick(
+      db,
+      new ScriptedProvider(script),
+      {
+        gameDayRealSeconds: 300,
+        simulationTickSeconds: 10,
+        dailyBudgetCents: 500,
+        providerName: 'mock',
+        modelName: 'mock',
+      },
+      new Date()
+    );
+
+    expect(result.errors.some((e) => allCharacterIds.some((id) => e.includes(id)))).toBe(false);
+
+    // BUY_ITEM: 3 * 100 = 300 cents spent, +3 inventory.
+    const [buyerWallet] = await db.select().from(schema.wallets).where(eq(schema.wallets.characterId, buyerId));
+    expect(buyerWallet.balanceCents).toBe(1000 - 300);
+    const [buyerInventory] = await db
+      .select()
+      .from(schema.inventory)
+      .where(and(eq(schema.inventory.characterId, buyerId), eq(schema.inventory.itemId, itemId)));
+    expect(buyerInventory.quantity).toBe(3);
+
+    // SELL_ITEM: 2 * (100 * 0.5) = 100 cents earned, 5 - 2 = 3 inventory left.
+    const [sellerWallet] = await db.select().from(schema.wallets).where(eq(schema.wallets.characterId, sellerId));
+    expect(sellerWallet.balanceCents).toBe(100);
+    const [sellerInventory] = await db
+      .select()
+      .from(schema.inventory)
+      .where(and(eq(schema.inventory.characterId, sellerId), eq(schema.inventory.itemId, itemId)));
+    expect(sellerInventory.quantity).toBe(3);
+
+    // GIVE_ITEM: giver 5 - 2 = 3, recipient 0 + 2 = 2.
+    const [giverInventory] = await db
+      .select()
+      .from(schema.inventory)
+      .where(and(eq(schema.inventory.characterId, giverId), eq(schema.inventory.itemId, itemId)));
+    expect(giverInventory.quantity).toBe(3);
+    const [recipientInventory] = await db
+      .select()
+      .from(schema.inventory)
+      .where(and(eq(schema.inventory.characterId, giveRecipientId), eq(schema.inventory.itemId, itemId)));
+    expect(recipientInventory.quantity).toBe(2);
+
+    // TRANSFER_MONEY: sender 1000 - 400 = 600, recipient 0 + 400 = 400.
+    const [senderWallet] = await db.select().from(schema.wallets).where(eq(schema.wallets.characterId, senderId));
+    expect(senderWallet.balanceCents).toBe(600);
+    const [moneyRecipientWallet] = await db
+      .select()
+      .from(schema.wallets)
+      .where(eq(schema.wallets.characterId, moneyRecipientId));
+    expect(moneyRecipientWallet.balanceCents).toBe(400);
+
+    // Both GIVE_ITEM and TRANSFER_MONEY are gifts (§5) — deterministic
+    // relationship effects, not LLM-assigned.
+    const relationshipRows = await db
+      .select()
+      .from(schema.relationships)
+      .where(
+        or(
+          and(eq(schema.relationships.characterAId, giverId), eq(schema.relationships.characterBId, giveRecipientId)),
+          and(eq(schema.relationships.characterAId, giveRecipientId), eq(schema.relationships.characterBId, giverId))
+        )
+      );
+    expect(relationshipRows.length).toBe(1);
+    expect(relationshipRows[0].trust).toBeGreaterThan(0);
+
+    const eventTypes = await db
+      .select({ type: schema.gameEvents.type })
+      .from(schema.gameEvents)
+      .where(inArray(schema.gameEvents.actorCharacterId, allCharacterIds));
+    const eventTypeSet = new Set(eventTypes.map((e) => e.type));
+    expect(eventTypeSet.has('ITEM_PURCHASED')).toBe(true);
+    expect(eventTypeSet.has('ITEM_SOLD')).toBe(true);
+    expect(eventTypeSet.has('ITEM_GIVEN')).toBe(true);
+    expect(eventTypeSet.has('MONEY_TRANSFERRED')).toBe(true);
+  });
+});

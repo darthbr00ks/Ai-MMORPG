@@ -20,6 +20,7 @@ const baseCtx: AgentDecisionContext = {
   availableActions: ['IDLE', 'MOVE', 'WORK'],
   visibleCharacters: [],
   activeConversations: [],
+  availableMarketItems: [],
   gameCycleId: 'cycle-1',
   gameDay: 1,
 };

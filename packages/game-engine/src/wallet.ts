@@ -137,3 +137,60 @@ export async function creditWallet(
     return { success: true, newToBalance: updated.balanceCents };
   });
 }
+
+/**
+ * Debit a character's wallet for money that leaves the game entirely
+ * (e.g. paying the NPC market for BUY_ITEM) rather than moving to
+ * another character's wallet — the mirror of creditWallet's "money
+ * materializing" (wages), recorded the same way: a ledger row with the
+ * other side left null. Fails closed on insufficient funds rather than
+ * allowing a negative balance.
+ */
+export async function debitWallet(
+  db: Db,
+  characterId: string,
+  amountCents: number,
+  reason: string
+): Promise<TransferResult> {
+  if (amountCents <= 0) {
+    return { success: false, reason: 'Amount must be positive' };
+  }
+
+  return db.transaction(async (tx) => {
+    const [wallet] = await tx
+      .select()
+      .from(wallets)
+      .where(eq(wallets.characterId, characterId))
+      .for('update')
+      .limit(1);
+
+    if (!wallet) {
+      return { success: false, reason: `No wallet for character ${characterId}` };
+    }
+    if (wallet.balanceCents < amountCents) {
+      return {
+        success: false,
+        reason: `Insufficient funds: has ${wallet.balanceCents}, needs ${amountCents}`,
+      };
+    }
+
+    const [updated] = await tx
+      .update(wallets)
+      .set({
+        balanceCents: wallet.balanceCents - amountCents,
+        updatedAt: new Date(),
+      })
+      .where(eq(wallets.characterId, characterId))
+      .returning({ balanceCents: wallets.balanceCents });
+
+    await tx.insert(transactions).values({
+      fromCharacterId: characterId,
+      toCharacterId: null,
+      amountCents,
+      reason,
+      createdAt: new Date(),
+    });
+
+    return { success: true, newFromBalance: updated.balanceCents };
+  });
+}

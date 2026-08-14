@@ -68,6 +68,11 @@ export function canonicalizeCharacterPair(
 const RELATIONSHIP_EFFECTS = {
   CONVERSATION_STARTED: { familiarity: 3, affection: 1 },
   CONVERSATION_CONTINUED: { familiarity: 2 },
+  // Phase 12 (§6 economy): a validated GIVE_ITEM/TRANSFER_MONEY is a
+  // deliberate, costly generosity signal — larger than a mere
+  // conversation, same "deltas only, deterministic" rule.
+  ITEM_GIVEN: { trust: 2, affection: 2 },
+  MONEY_GIVEN: { trust: 3, affection: 1 },
 } as const satisfies Record<string, Partial<RelationshipDimensions>>;
 
 export type RelationshipEffectType = keyof typeof RELATIONSHIP_EFFECTS;

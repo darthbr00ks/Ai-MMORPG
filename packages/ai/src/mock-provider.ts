@@ -85,6 +85,14 @@ export class MockProvider implements AgentModelProvider {
       action = 'WORK';
       goal = 'earn more money';
       intent = 'Working to secure financial stability';
+    } else if (ctx.currentLocation === 'market' && ctx.availableMarketItems.length > 0) {
+      // Comfortably wealthy (the wallet < 5000 branch above didn't
+      // fire) and standing at the one place BUY_ITEM is legal —
+      // exercises the Phase 12 economy actions in dev/tests without a
+      // separate modulo-cadence gate like the social loop above.
+      action = 'BUY_ITEM';
+      goal = 'stock up on supplies';
+      intent = `Buying ${ctx.availableMarketItems[0].name.toLowerCase()} at the market`;
     }
 
     // For MOVE, use the first visible character's location or a safe default.
@@ -99,6 +107,18 @@ export class MockProvider implements AgentModelProvider {
         parameters: {},
         intent,
         priority: isAmbitious ? 0.8 : 0.5,
+      };
+    }
+
+    if (action === 'BUY_ITEM') {
+      const item = ctx.availableMarketItems[0];
+      return {
+        goal,
+        selected_action: 'BUY_ITEM',
+        target_id: item.itemId,
+        parameters: { quantity: 1 },
+        intent,
+        priority: 0.4,
       };
     }
 
