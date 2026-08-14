@@ -270,3 +270,206 @@ describe('validateAction - CONTINUE_CONVERSATION', () => {
     expect(result.valid).toBe(false);
   });
 });
+
+const marketChar = { ...baseChar, locationSlug: 'market' };
+const worldWithItem = { ...worldState, itemIds: ['item-1'] };
+
+describe('validateAction - BUY_ITEM', () => {
+  it('accepts buying a known item at the Market with a positive integer quantity', () => {
+    const action: AgentDecision = {
+      goal: 'stock up',
+      selected_action: 'BUY_ITEM',
+      target_id: 'item-1',
+      parameters: { quantity: 2 },
+      intent: 'buying food',
+      priority: 0.3,
+    };
+    const result = validateAction(action, marketChar, worldWithItem);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects away from the Market', () => {
+    const action: AgentDecision = {
+      goal: 'stock up',
+      selected_action: 'BUY_ITEM',
+      target_id: 'item-1',
+      parameters: { quantity: 1 },
+      intent: 'buying food',
+      priority: 0.3,
+    };
+    const result = validateAction(action, baseChar, worldWithItem);
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects an unknown item id', () => {
+    const action: AgentDecision = {
+      goal: 'stock up',
+      selected_action: 'BUY_ITEM',
+      target_id: 'not-a-real-item',
+      parameters: { quantity: 1 },
+      intent: 'buying food',
+      priority: 0.3,
+    };
+    const result = validateAction(action, marketChar, worldWithItem);
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects a non-positive or non-integer quantity', () => {
+    const zero: AgentDecision = {
+      goal: 'stock up',
+      selected_action: 'BUY_ITEM',
+      target_id: 'item-1',
+      parameters: { quantity: 0 },
+      intent: 'buying food',
+      priority: 0.3,
+    };
+    expect(validateAction(zero, marketChar, worldWithItem).valid).toBe(false);
+
+    const fractional: AgentDecision = { ...zero, parameters: { quantity: 1.5 } };
+    expect(validateAction(fractional, marketChar, worldWithItem).valid).toBe(false);
+
+    const missing: AgentDecision = { ...zero, parameters: {} };
+    expect(validateAction(missing, marketChar, worldWithItem).valid).toBe(false);
+  });
+});
+
+describe('validateAction - SELL_ITEM', () => {
+  it('accepts selling a known item at the Market', () => {
+    const action: AgentDecision = {
+      goal: 'raise cash',
+      selected_action: 'SELL_ITEM',
+      target_id: 'item-1',
+      parameters: { quantity: 1 },
+      intent: 'selling wood',
+      priority: 0.3,
+    };
+    const result = validateAction(action, marketChar, worldWithItem);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects away from the Market', () => {
+    const action: AgentDecision = {
+      goal: 'raise cash',
+      selected_action: 'SELL_ITEM',
+      target_id: 'item-1',
+      parameters: { quantity: 1 },
+      intent: 'selling wood',
+      priority: 0.3,
+    };
+    const result = validateAction(action, baseChar, worldWithItem);
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe('validateAction - GIVE_ITEM', () => {
+  const worldWithVisibleCharacterAndItem = {
+    ...worldState,
+    charactersAtSameLocation: ['char-2'],
+    itemIds: ['item-1'],
+  };
+
+  it('accepts giving a known item to a visible character', () => {
+    const action: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'GIVE_ITEM',
+      target_id: 'char-2',
+      parameters: { itemId: 'item-1', quantity: 1 },
+      intent: 'sharing food',
+      priority: 0.3,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacterAndItem);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects giving to yourself', () => {
+    const action: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'GIVE_ITEM',
+      target_id: baseChar.id,
+      parameters: { itemId: 'item-1', quantity: 1 },
+      intent: 'sharing food',
+      priority: 0.3,
+    };
+    const result = validateAction(
+      action,
+      baseChar,
+      { ...worldWithVisibleCharacterAndItem, charactersAtSameLocation: [baseChar.id] }
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects a target not at the same location', () => {
+    const action: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'GIVE_ITEM',
+      target_id: 'char-far-away',
+      parameters: { itemId: 'item-1', quantity: 1 },
+      intent: 'sharing food',
+      priority: 0.3,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacterAndItem);
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects a missing or unknown itemId', () => {
+    const missing: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'GIVE_ITEM',
+      target_id: 'char-2',
+      parameters: { quantity: 1 },
+      intent: 'sharing food',
+      priority: 0.3,
+    };
+    expect(validateAction(missing, baseChar, worldWithVisibleCharacterAndItem).valid).toBe(false);
+
+    const unknown: AgentDecision = { ...missing, parameters: { itemId: 'nope', quantity: 1 } };
+    expect(validateAction(unknown, baseChar, worldWithVisibleCharacterAndItem).valid).toBe(false);
+  });
+});
+
+describe('validateAction - TRANSFER_MONEY', () => {
+  const worldWithVisibleCharacter = { ...worldState, charactersAtSameLocation: ['char-2'] };
+
+  it('accepts transferring a positive integer amount to a visible character', () => {
+    const action: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'TRANSFER_MONEY',
+      target_id: 'char-2',
+      parameters: { amountCents: 500 },
+      intent: 'lending a hand',
+      priority: 0.3,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacter);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects transferring to yourself', () => {
+    const action: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'TRANSFER_MONEY',
+      target_id: baseChar.id,
+      parameters: { amountCents: 500 },
+      intent: 'lending a hand',
+      priority: 0.3,
+    };
+    const result = validateAction(
+      action,
+      baseChar,
+      { ...worldWithVisibleCharacter, charactersAtSameLocation: [baseChar.id] }
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects a non-positive amount', () => {
+    const action: AgentDecision = {
+      goal: 'help a friend',
+      selected_action: 'TRANSFER_MONEY',
+      target_id: 'char-2',
+      parameters: { amountCents: -100 },
+      intent: 'lending a hand',
+      priority: 0.3,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacter);
+    expect(result.valid).toBe(false);
+  });
+});

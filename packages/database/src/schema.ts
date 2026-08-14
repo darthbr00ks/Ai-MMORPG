@@ -175,6 +175,12 @@ export const items = pgTable('items', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   category: text('category').notNull(),
+  // Fixed NPC-market price (§6: currency, food, iron, wood). Phase 12
+  // ships a simple fixed-price market, not player-to-player price
+  // discovery — BUY_ITEM pays this; SELL_ITEM pays a fraction of it
+  // (see MARKET_SELL_MULTIPLIER in tick-processor.ts), so buying and
+  // reselling immediately is always a loss, same as any NPC shop.
+  basePriceCents: integer('base_price_cents').notNull(),
 });
 
 // Inventory

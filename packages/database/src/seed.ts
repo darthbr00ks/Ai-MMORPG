@@ -274,6 +274,14 @@ const CHARACTERS = [
   },
 ];
 
+// §6 of the build plan: currency, food, iron, wood. Fixed NPC-market
+// prices for Phase 12's simple economy — see items.basePriceCents.
+const ITEMS = [
+  { name: 'Food', category: 'food', basePriceCents: 20 },
+  { name: 'Iron', category: 'resource', basePriceCents: 80 },
+  { name: 'Wood', category: 'resource', basePriceCents: 15 },
+];
+
 async function seed() {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('DATABASE_URL required');
@@ -354,6 +362,29 @@ async function seed() {
       });
 
       console.log(`  Character: ${char.name} at ${char.startingLocation}`);
+    }
+  }
+
+  console.log('Seeding items...');
+  for (const item of ITEMS) {
+    const existing = await db
+      .select()
+      .from(schema.items)
+      .where(eq(schema.items.name, item.name))
+      .limit(1);
+
+    if (existing.length > 0) {
+      console.log(`  Item exists: ${item.name}`);
+    } else {
+      const [inserted] = await db
+        .insert(schema.items)
+        .values({
+          name: item.name,
+          category: item.category,
+          basePriceCents: item.basePriceCents,
+        })
+        .returning({ id: schema.items.id });
+      console.log(`  Item: ${item.name} (${inserted.id}) — ${item.basePriceCents}¢`);
     }
   }
 

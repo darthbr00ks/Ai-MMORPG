@@ -14,16 +14,25 @@ import {
   conversations,
   conversationMessages,
   memories,
+  items,
 } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
-import { validateAction, applyRelationshipEffect, getRelationship } from '@ai-world/game-engine';
-import { creditWallet } from '@ai-world/game-engine';
+import {
+  validateAction,
+  applyRelationshipEffect,
+  getRelationship,
+  transferItem,
+  addToInventory,
+  removeFromInventory,
+} from '@ai-world/game-engine';
+import { creditWallet, debitWallet, transferMoney } from '@ai-world/game-engine';
 import { extractDailyMemories } from './memory-extraction.js';
 import type {
   AgentDecision,
   AgentDecisionContext,
   ActiveConversationSummary,
   VisibleCharacter,
+  AvailableMarketItem,
 } from '@ai-world/shared';
 import { AgentDecisionSchema } from '@ai-world/shared';
 import { gameTimeNow } from '@ai-world/shared';
@@ -126,6 +135,19 @@ export async function processTick(
     .from(characters);
 
   const characterNameById = new Map(allCharacters.map((c) => [c.id, c.name]));
+
+  // The market catalog is world-wide and static within a tick — one
+  // query, reused for every character (§12: BUY_ITEM/SELL_ITEM only
+  // at the Market, but every character needs to know what's for sale
+  // to reason about whether to travel there).
+  const marketCatalog = await db.select().from(items);
+  const itemIds = marketCatalog.map((i) => i.id);
+  const itemById = new Map(marketCatalog.map((i) => [i.id, i]));
+  const availableMarketItems: AvailableMarketItem[] = marketCatalog.map((i) => ({
+    itemId: i.id,
+    name: i.name,
+    basePriceCents: i.basePriceCents,
+  }));
 
   // --- Conversation visibility & context (§5, §10) ---------------------
   // Batch-loaded once per tick rather than per character: with 20+
@@ -361,9 +383,20 @@ export async function processTick(
         walletCents: wallet?.balanceCents || 0,
         currentGoals: (char.ambitions as string[]) || [],
         recentMemories: recentMemoriesByCharacterId.get(char.id) ?? [],
-        availableActions: ['IDLE', 'MOVE', 'WORK', 'START_CONVERSATION', 'CONTINUE_CONVERSATION'],
+        availableActions: [
+          'IDLE',
+          'MOVE',
+          'WORK',
+          'START_CONVERSATION',
+          'CONTINUE_CONVERSATION',
+          'BUY_ITEM',
+          'SELL_ITEM',
+          'GIVE_ITEM',
+          'TRANSFER_MONEY',
+        ],
         visibleCharacters,
         activeConversations,
+        availableMarketItems,
         gameCycleId: cycleId,
         gameDay: gameTime.day,
       };
@@ -437,6 +470,7 @@ export async function processTick(
         currentGameDay: gameTime.day,
         charactersAtSameLocation: visibleCharacters.map((v) => v.characterId),
         activeConversationIds: activeConversations.map((c) => c.conversationId),
+        itemIds,
       };
 
       const validation = validateAction(
@@ -506,6 +540,7 @@ export async function processTick(
           characterNameById,
           conversationInfoById,
           conversationMessageCounts,
+          itemById,
         });
       } else {
         // Write rejected event
@@ -587,6 +622,18 @@ function moveDurationMs(gameDayRealSeconds: number): number {
 // instead of running until a character wanders off mid-tick.
 const MAX_CONVERSATION_MESSAGES = 6;
 
+interface MarketItemRow {
+  id: string;
+  name: string;
+  category: string;
+  basePriceCents: number;
+}
+
+// A market sale always pays less than the buy price — otherwise
+// buying and immediately reselling would be free money, not an NPC
+// shop. Matches ordinary buy-high/sell-low shop economics.
+const MARKET_SELL_MULTIPLIER = 0.5;
+
 interface ExecuteActionParams {
   db: Db;
   provider: AgentModelProvider;
@@ -599,6 +646,7 @@ interface ExecuteActionParams {
   characterNameById: Map<string, string>;
   conversationInfoById: Map<string, { participantIds: string[]; locationId: string | null }>;
   conversationMessageCounts: Map<string, number>;
+  itemById: Map<string, MarketItemRow>;
 }
 
 async function executeAction(params: ExecuteActionParams): Promise<void> {
@@ -614,6 +662,7 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
     characterNameById,
     conversationInfoById,
     conversationMessageCounts,
+    itemById,
   } = params;
   const characterId = actor.id;
 
@@ -868,6 +917,190 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
           createdAt: new Date(),
         });
       }
+      break;
+    }
+
+    case 'BUY_ITEM': {
+      const itemId = decision.target_id;
+      const item = itemId ? itemById.get(itemId) : undefined;
+      const quantity = decision.parameters?.quantity;
+      if (!item || typeof quantity !== 'number' || quantity <= 0) return;
+
+      const totalCostCents = item.basePriceCents * Math.floor(quantity);
+      const debit = await debitWallet(db, characterId, totalCostCents, `Bought ${quantity}x ${item.name}`);
+
+      if (!debit.success) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          locationId: state.locationId,
+          payload: { action: 'BUY_ITEM', reason: debit.reason },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        break;
+      }
+
+      await addToInventory(db, characterId, item.id, Math.floor(quantity));
+
+      await db.insert(gameEvents).values({
+        type: 'ITEM_PURCHASED',
+        actorCharacterId: characterId,
+        locationId: state.locationId,
+        payload: {
+          item_id: item.id,
+          item_name: item.name,
+          quantity: Math.floor(quantity),
+          total_cost_cents: totalCostCents,
+          intent: decision.intent,
+        },
+        importance: 0.2,
+        createdAt: new Date(),
+      });
+      break;
+    }
+
+    case 'SELL_ITEM': {
+      const itemId = decision.target_id;
+      const item = itemId ? itemById.get(itemId) : undefined;
+      const quantity = decision.parameters?.quantity;
+      if (!item || typeof quantity !== 'number' || quantity <= 0) return;
+
+      const removed = await removeFromInventory(db, characterId, item.id, Math.floor(quantity));
+      if (!removed.success) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          locationId: state.locationId,
+          payload: { action: 'SELL_ITEM', reason: removed.reason },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        break;
+      }
+
+      const totalSaleCents = Math.floor(item.basePriceCents * MARKET_SELL_MULTIPLIER) * Math.floor(quantity);
+      await creditWallet(db, characterId, totalSaleCents, `Sold ${quantity}x ${item.name}`);
+
+      await db.insert(gameEvents).values({
+        type: 'ITEM_SOLD',
+        actorCharacterId: characterId,
+        locationId: state.locationId,
+        payload: {
+          item_id: item.id,
+          item_name: item.name,
+          quantity: Math.floor(quantity),
+          total_sale_cents: totalSaleCents,
+          intent: decision.intent,
+        },
+        importance: 0.2,
+        createdAt: new Date(),
+      });
+      break;
+    }
+
+    case 'GIVE_ITEM': {
+      const targetCharacterId = decision.target_id;
+      const itemId = decision.parameters?.itemId;
+      const quantity = decision.parameters?.quantity;
+      if (
+        !targetCharacterId ||
+        typeof itemId !== 'string' ||
+        typeof quantity !== 'number' ||
+        quantity <= 0
+      ) {
+        return;
+      }
+      const item = itemById.get(itemId);
+      if (!item) return;
+
+      const transfer = await transferItem(db, characterId, targetCharacterId, itemId, Math.floor(quantity));
+      if (!transfer.success) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          targetCharacterId,
+          locationId: state.locationId,
+          payload: { action: 'GIVE_ITEM', reason: transfer.reason },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        break;
+      }
+
+      await db.insert(gameEvents).values({
+        type: 'ITEM_GIVEN',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: {
+          item_id: item.id,
+          item_name: item.name,
+          quantity: Math.floor(quantity),
+          intent: decision.intent,
+        },
+        importance: 0.25,
+        createdAt: new Date(),
+      });
+
+      const effect = await applyRelationshipEffect(db, characterId, targetCharacterId, 'ITEM_GIVEN');
+      await db.insert(gameEvents).values({
+        type: 'RELATIONSHIP_CHANGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: { effect: 'ITEM_GIVEN', before: effect.before, after: effect.after },
+        importance: 0.1,
+        createdAt: new Date(),
+      });
+      break;
+    }
+
+    case 'TRANSFER_MONEY': {
+      const targetCharacterId = decision.target_id;
+      const amountCents = decision.parameters?.amountCents;
+      if (!targetCharacterId || typeof amountCents !== 'number' || amountCents <= 0) return;
+
+      const transfer = await transferMoney(
+        db,
+        characterId,
+        targetCharacterId,
+        Math.floor(amountCents),
+        'Player-directed money transfer'
+      );
+      if (!transfer.success) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          targetCharacterId,
+          locationId: state.locationId,
+          payload: { action: 'TRANSFER_MONEY', reason: transfer.reason },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        break;
+      }
+
+      await db.insert(gameEvents).values({
+        type: 'MONEY_TRANSFERRED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: { amount_cents: Math.floor(amountCents), intent: decision.intent },
+        importance: 0.25,
+        createdAt: new Date(),
+      });
+
+      const effect = await applyRelationshipEffect(db, characterId, targetCharacterId, 'MONEY_GIVEN');
+      await db.insert(gameEvents).values({
+        type: 'RELATIONSHIP_CHANGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: { effect: 'MONEY_GIVEN', before: effect.before, after: effect.after },
+        importance: 0.1,
+        createdAt: new Date(),
+      });
       break;
     }
   }

@@ -55,6 +55,16 @@ export interface ActiveConversationSummary {
   lastMessage: string | null;
 }
 
+/** An item the NPC market at the current location will buy/sell — the
+ * model needs the id to address BUY_ITEM/SELL_ITEM's target_id, and
+ * the price to reason about whether it's worth it. Phase 12 ships one
+ * fixed catalog, world-wide, not a per-location assortment. */
+export interface AvailableMarketItem {
+  itemId: string;
+  name: string;
+  basePriceCents: number;
+}
+
 export interface AgentDecisionContext {
   characterId: string;
   name: string;
@@ -72,6 +82,7 @@ export interface AgentDecisionContext {
   recentMemories: string[];
   availableActions: string[];
   visibleCharacters: VisibleCharacter[];
+  availableMarketItems: AvailableMarketItem[];
   activeConversations: ActiveConversationSummary[];
   gameCycleId: string;
   gameDay: number;
@@ -146,6 +157,10 @@ export const GameEventTypes = [
   'CONVERSATION_STARTED',
   'CONVERSATION_MESSAGE',
   'CONVERSATION_ENDED',
+  'ITEM_PURCHASED',
+  'ITEM_SOLD',
+  'ITEM_GIVEN',
+  'MONEY_TRANSFERRED',
   'SIMULATION_TICK_STARTED',
   'SIMULATION_TICK_COMPLETED',
 ] as const;
