@@ -19,14 +19,17 @@
     },
     "db:generate": {},
     "db:migrate": {
+      "dependsOn": ["^build"],
       "env": ["DATABASE_URL"],
       "cache": false
     },
     "db:seed": {
+      "dependsOn": ["^build"],
       "env": ["DATABASE_URL"],
       "cache": false
     },
     "db:fix-jsonb-double-encoding": {
+      "dependsOn": ["^build"],
       "env": ["DATABASE_URL"],
       "cache": false
     },
