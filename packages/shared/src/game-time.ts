@@ -39,3 +39,27 @@ export function currentGameDay(
 ): number {
   return gameTimeNow(cycleStartedAt, dayRealSeconds).day;
 }
+
+export interface GameDayRealTimeWindow {
+  start: Date;
+  end: Date;
+}
+
+/**
+ * The real-world [start, end) window a given game day number spans,
+ * derived directly from the world epoch — independent of whether any
+ * tick actually ran during that day. `game_cycles` rows are only
+ * created lazily, the first time a tick observes a new day number
+ * (see tick-processor.ts); a worker outage or restart spanning a day
+ * boundary must not cause that day's window to be unrecoverable just
+ * because no row happens to exist for it.
+ */
+export function gameDayRealTimeWindow(
+  dayNumber: number,
+  cycleStartedAt: Date,
+  dayRealSeconds: number
+): GameDayRealTimeWindow {
+  const start = new Date(cycleStartedAt.getTime() + dayNumber * dayRealSeconds * 1000);
+  const end = new Date(start.getTime() + dayRealSeconds * 1000);
+  return { start, end };
+}

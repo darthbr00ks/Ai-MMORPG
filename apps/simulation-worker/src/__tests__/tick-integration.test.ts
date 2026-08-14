@@ -533,3 +533,122 @@ describe.skipIf(!DB_URL)(
     });
   }
 );
+
+/**
+ * A provider that records the AgentDecisionContext it was handed for
+ * EVERY character (processTick sweeps the whole characters table, not
+ * just a test's own rows, and iteration order is not guaranteed — a
+ * single "last context" would be whichever character the query
+ * happened to visit last, not necessarily the one under test). Keyed
+ * by characterId so the test can look up its own character
+ * specifically. This is what makes ctx.recentMemories (Phase 11)
+ * observable from outside processTick.
+ */
+class ContextCapturingProvider extends MockProvider {
+  contextsByCharacterId = new Map<string, AgentDecisionContext>();
+
+  override async decideAction(ctx: AgentDecisionContext): Promise<AgentDecision> {
+    this.contextsByCharacterId.set(ctx.characterId, ctx);
+    return super.decideAction(ctx);
+  }
+}
+
+describe.skipIf(!DB_URL)('processTick — recentMemories reaches the decision context', () => {
+  let client: ReturnType<typeof postgres>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  let characterId: string;
+  let locationId: string;
+  const memoryContent = 'Once helped a stranger find their way to the market.';
+
+  beforeAll(async () => {
+    client = postgres(DB_URL!);
+    db = drizzle(client, { schema });
+
+    const [location] = await db
+      .insert(schema.locations)
+      .values({
+        name: 'Memory Context Test Square',
+        slug: `memory-context-test-square-${Date.now()}`,
+        description: 'A test location',
+        connections: [],
+      })
+      .returning({ id: schema.locations.id });
+    locationId = location.id;
+
+    const [character] = await db
+      .insert(schema.characters)
+      .values({
+        name: 'Rememberer',
+        age: 45,
+        background: 'A character created to test recentMemories context wiring.',
+        personalityTraits: [],
+        skills: [],
+        ambitions: [],
+        archetype: 'peacekeeper',
+      })
+      .returning({ id: schema.characters.id });
+    characterId = character.id;
+
+    await db.insert(schema.characterState).values({
+      characterId,
+      locationId,
+      health: 100,
+      fatigue: 0,
+      status: 'idle',
+    });
+    await db.insert(schema.wallets).values({ characterId, balanceCents: 1000 });
+    await db.insert(schema.memories).values({
+      characterId,
+      kind: 'episodic',
+      content: memoryContent,
+      importance: 0.5,
+    });
+  });
+
+  afterAll(async () => {
+    await db.delete(schema.memories).where(eq(schema.memories.characterId, characterId));
+    await db.delete(schema.gameEvents).where(eq(schema.gameEvents.actorCharacterId, characterId));
+    await db.delete(schema.aiUsage).where(eq(schema.aiUsage.characterId, characterId));
+    await db.delete(schema.agentActions).where(
+      inArray(
+        schema.agentActions.decisionId,
+        (
+          await db
+            .select({ id: schema.agentDecisions.id })
+            .from(schema.agentDecisions)
+            .where(eq(schema.agentDecisions.characterId, characterId))
+        ).map((d) => d.id)
+      )
+    );
+    await db.delete(schema.agentDecisions).where(eq(schema.agentDecisions.characterId, characterId));
+    // A WORK action credits the wallet, which writes a ledger row with
+    // this character as the recipient — must go before the
+    // wallet/character delete, same as the first describe block above.
+    await db.delete(schema.transactions).where(eq(schema.transactions.toCharacterId, characterId));
+    await db.delete(schema.wallets).where(eq(schema.wallets.characterId, characterId));
+    await db.delete(schema.characterState).where(eq(schema.characterState.characterId, characterId));
+    await db.delete(schema.characters).where(eq(schema.characters.id, characterId));
+    await db.delete(schema.locations).where(eq(schema.locations.id, locationId));
+    await client.end();
+  });
+
+  it('includes a pre-existing memory in the character\'s decision context', async () => {
+    const provider = new ContextCapturingProvider();
+    await processTick(
+      db,
+      provider,
+      {
+        gameDayRealSeconds: 300,
+        simulationTickSeconds: 10,
+        dailyBudgetCents: 500,
+        providerName: 'mock',
+        modelName: 'mock',
+      },
+      new Date()
+    );
+
+    const ctx = provider.contextsByCharacterId.get(characterId);
+    expect(ctx).toBeDefined();
+    expect(ctx?.recentMemories).toContain(memoryContent);
+  });
+});
