@@ -1,4 +1,4 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, isNull, inArray } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import {
   characters,
@@ -11,11 +11,18 @@ import {
   gameCycles,
   locations,
   aiUsage,
+  conversations,
+  conversationMessages,
 } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
-import { validateAction } from '@ai-world/game-engine';
+import { validateAction, applyRelationshipEffect, getRelationship } from '@ai-world/game-engine';
 import { creditWallet } from '@ai-world/game-engine';
-import type { AgentDecision, AgentDecisionContext } from '@ai-world/shared';
+import type {
+  AgentDecision,
+  AgentDecisionContext,
+  ActiveConversationSummary,
+  VisibleCharacter,
+} from '@ai-world/shared';
 import { AgentDecisionSchema } from '@ai-world/shared';
 import { gameTimeNow } from '@ai-world/shared';
 
@@ -88,6 +95,94 @@ export async function processTick(
       ambitions: characters.ambitions,
     })
     .from(characters);
+
+  const characterNameById = new Map(allCharacters.map((c) => [c.id, c.name]));
+
+  // --- Conversation visibility & context (§5, §10) ---------------------
+  // Batch-loaded once per tick rather than per character: with 20+
+  // characters this turns what would be O(characters) extra round trips
+  // into 3 fixed queries.
+
+  // Who's standing where right now — a character mid-travel isn't
+  // "at" either location, so they're excluded from both origin and
+  // destination visibility until they arrive.
+  const allCharacterLocations = await db
+    .select({
+      characterId: characterState.characterId,
+      locationId: characterState.locationId,
+      status: characterState.status,
+    })
+    .from(characterState);
+
+  const characterIdsByLocationId = new Map<string, string[]>();
+  for (const row of allCharacterLocations) {
+    if (row.status === 'traveling') continue;
+    const occupants = characterIdsByLocationId.get(row.locationId) ?? [];
+    occupants.push(row.characterId);
+    characterIdsByLocationId.set(row.locationId, occupants);
+  }
+
+  // Every conversation still open (no endedAt), plus its messages, so
+  // each character's activeConversations can carry the last line
+  // without a per-character query.
+  const openConversationRows = await db
+    .select()
+    .from(conversations)
+    .where(isNull(conversations.endedAt));
+
+  const conversationInfoById = new Map<
+    string,
+    { participantIds: string[]; locationId: string | null }
+  >();
+  for (const row of openConversationRows) {
+    conversationInfoById.set(row.id, {
+      participantIds: (row.participantIds as string[]) ?? [],
+      locationId: row.locationId,
+    });
+  }
+
+  const openConversationIds = openConversationRows.map((c) => c.id);
+  const messagesByConversationId = new Map<
+    string,
+    { characterId: string; content: string; createdAt: Date }[]
+  >();
+  if (openConversationIds.length > 0) {
+    const openMessages = await db
+      .select()
+      .from(conversationMessages)
+      .where(inArray(conversationMessages.conversationId, openConversationIds))
+      .orderBy(conversationMessages.createdAt);
+    for (const msg of openMessages) {
+      const bucket = messagesByConversationId.get(msg.conversationId) ?? [];
+      bucket.push({ characterId: msg.characterId, content: msg.content, createdAt: msg.createdAt });
+      messagesByConversationId.set(msg.conversationId, bucket);
+    }
+  }
+  // Running count per conversation, incremented in-memory as new
+  // messages are written during this tick's loop — keeps the
+  // 6-message cap (see executeAction) accurate even if two
+  // participants of the same conversation are both processed in the
+  // same tick, without re-querying per write.
+  const conversationMessageCounts = new Map<string, number>(
+    Array.from(messagesByConversationId.entries()).map(([id, msgs]) => [id, msgs.length])
+  );
+
+  const activeConversationsByCharacterId = new Map<string, ActiveConversationSummary[]>();
+  for (const [conversationId, info] of conversationInfoById) {
+    const messages = messagesByConversationId.get(conversationId) ?? [];
+    const lastMessage = messages.length > 0 ? messages[messages.length - 1].content : null;
+    for (const participantId of info.participantIds) {
+      const otherId = info.participantIds.find((id) => id !== participantId) ?? null;
+      const summary: ActiveConversationSummary = {
+        conversationId,
+        otherCharacterName: otherId ? characterNameById.get(otherId) ?? 'someone' : 'someone',
+        lastMessage,
+      };
+      const existing = activeConversationsByCharacterId.get(participantId) ?? [];
+      existing.push(summary);
+      activeConversationsByCharacterId.set(participantId, existing);
+    }
+  }
 
   let processedCount = 0;
 
@@ -188,6 +283,14 @@ export async function processTick(
         )
         .limit(1);
 
+      const visibleCharacters: VisibleCharacter[] = (
+        characterIdsByLocationId.get(currentState.locationId) ?? []
+      )
+        .filter((id) => id !== char.id)
+        .map((id) => ({ characterId: id, name: characterNameById.get(id) ?? 'someone' }));
+
+      const activeConversations = activeConversationsByCharacterId.get(char.id) ?? [];
+
       const ctx: AgentDecisionContext = {
         characterId: char.id,
         name: char.name,
@@ -203,8 +306,9 @@ export async function processTick(
         walletCents: wallet?.balanceCents || 0,
         currentGoals: (char.ambitions as string[]) || [],
         recentMemories: [],
-        availableActions: ['IDLE', 'MOVE', 'WORK'],
-        visibleCharacters: [],
+        availableActions: ['IDLE', 'MOVE', 'WORK', 'START_CONVERSATION', 'CONTINUE_CONVERSATION'],
+        visibleCharacters,
+        activeConversations,
         gameCycleId: cycleId,
         gameDay: gameTime.day,
       };
@@ -276,6 +380,8 @@ export async function processTick(
       const worldState = {
         locations: locationsBySlug,
         currentGameDay: gameTime.day,
+        charactersAtSameLocation: visibleCharacters.map((v) => v.characterId),
+        activeConversationIds: activeConversations.map((c) => c.conversationId),
       };
 
       const validation = validateAction(
@@ -329,15 +435,23 @@ export async function processTick(
 
       // Execute valid actions
       if (validation.valid) {
-        await executeAction(
+        await executeAction({
           db,
-          char.id,
+          provider,
+          actor: {
+            id: char.id,
+            name: char.name,
+            personalityTraits: ctx.personalityTraits,
+          },
           decision,
-          currentState,
-          locationsBySlug,
+          state: currentState,
+          locations: locationsBySlug,
           cycleId,
-          config.gameDayRealSeconds
-        );
+          gameDayRealSeconds: config.gameDayRealSeconds,
+          characterNameById,
+          conversationInfoById,
+          conversationMessageCounts,
+        });
       } else {
         // Write rejected event
         await db.insert(gameEvents).values({
@@ -412,15 +526,42 @@ function moveDurationMs(gameDayRealSeconds: number): number {
   return (MOVE_DURATION_GAME_HOURS / 24) * gameDayRealSeconds * 1000;
 }
 
-async function executeAction(
-  db: Db,
-  characterId: string,
-  decision: AgentDecision,
-  state: { locationId: string; status: string },
-  locations: LocationInfo[],
-  cycleId: string,
-  gameDayRealSeconds: number
-): Promise<void> {
+// A conversation caps at this many total messages before the engine
+// ends it deterministically — bounds token spend (every message is a
+// generateDialogue call) and gives conversations a natural close
+// instead of running until a character wanders off mid-tick.
+const MAX_CONVERSATION_MESSAGES = 6;
+
+interface ExecuteActionParams {
+  db: Db;
+  provider: AgentModelProvider;
+  actor: { id: string; name: string; personalityTraits: Array<{ trait: string; weight: number }> };
+  decision: AgentDecision;
+  state: { locationId: string; status: string };
+  locations: LocationInfo[];
+  cycleId: string;
+  gameDayRealSeconds: number;
+  characterNameById: Map<string, string>;
+  conversationInfoById: Map<string, { participantIds: string[]; locationId: string | null }>;
+  conversationMessageCounts: Map<string, number>;
+}
+
+async function executeAction(params: ExecuteActionParams): Promise<void> {
+  const {
+    db,
+    provider,
+    actor,
+    decision,
+    state,
+    locations,
+    cycleId,
+    gameDayRealSeconds,
+    characterNameById,
+    conversationInfoById,
+    conversationMessageCounts,
+  } = params;
+  const characterId = actor.id;
+
   switch (decision.selected_action) {
     case 'IDLE': {
       await db
@@ -514,6 +655,164 @@ async function executeAction(
         importance: 0.3,
         createdAt: new Date(),
       });
+      break;
+    }
+
+    case 'START_CONVERSATION': {
+      const targetCharacterId = decision.target_id;
+      if (!targetCharacterId) return;
+      const targetName = characterNameById.get(targetCharacterId) ?? 'someone';
+
+      const [conversationRow] = await db
+        .insert(conversations)
+        .values({
+          locationId: state.locationId,
+          participantIds: [characterId, targetCharacterId],
+          visibility: 'public',
+        })
+        .returning({ id: conversations.id });
+
+      const relationship = await getRelationship(db, characterId, targetCharacterId);
+      const topic =
+        typeof decision.parameters?.topic === 'string' ? decision.parameters.topic : decision.intent;
+
+      const dialogue = await provider.generateDialogue({
+        characterId,
+        name: actor.name,
+        personalityTraits: actor.personalityTraits,
+        targetCharacterId,
+        targetName,
+        relationship: { ...relationship },
+        topic,
+        gameCycleId: cycleId,
+      });
+
+      await db.insert(conversationMessages).values({
+        conversationId: conversationRow.id,
+        characterId,
+        content: dialogue.message,
+      });
+      conversationMessageCounts.set(conversationRow.id, 1);
+
+      await db.insert(gameEvents).values({
+        type: 'CONVERSATION_STARTED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: {
+          conversation_id: conversationRow.id,
+          message: dialogue.message,
+          emotional_tone: dialogue.emotionalTone,
+          topic,
+        },
+        importance: 0.3,
+        createdAt: new Date(),
+      });
+
+      // Deterministic engine effect, not the LLM's to decide (§5) — the
+      // model chose to talk; how much that moves the relationship needle
+      // comes from relationship-engine.ts's fixed effect table.
+      const effect = await applyRelationshipEffect(
+        db,
+        characterId,
+        targetCharacterId,
+        'CONVERSATION_STARTED'
+      );
+      await db.insert(gameEvents).values({
+        type: 'RELATIONSHIP_CHANGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: { effect: 'CONVERSATION_STARTED', before: effect.before, after: effect.after },
+        importance: 0.15,
+        createdAt: new Date(),
+      });
+      break;
+    }
+
+    case 'CONTINUE_CONVERSATION': {
+      const conversationId = decision.target_id;
+      if (!conversationId) return;
+
+      // Re-check against the batch-loaded map even though the validator
+      // already confirmed this conversation is open for this character —
+      // never trust that upstream state can't have shifted; a missing
+      // entry here means write nothing rather than guess.
+      const info = conversationInfoById.get(conversationId);
+      if (!info) return;
+      const targetCharacterId = info.participantIds.find((id) => id !== characterId);
+      if (!targetCharacterId) return;
+      const targetName = characterNameById.get(targetCharacterId) ?? 'someone';
+      const eventLocationId = info.locationId ?? state.locationId;
+
+      const relationship = await getRelationship(db, characterId, targetCharacterId);
+
+      const dialogue = await provider.generateDialogue({
+        characterId,
+        name: actor.name,
+        personalityTraits: actor.personalityTraits,
+        targetCharacterId,
+        targetName,
+        relationship: { ...relationship },
+        topic: decision.intent,
+        gameCycleId: cycleId,
+      });
+
+      await db.insert(conversationMessages).values({
+        conversationId,
+        characterId,
+        content: dialogue.message,
+      });
+
+      const messageCount = (conversationMessageCounts.get(conversationId) ?? 0) + 1;
+      conversationMessageCounts.set(conversationId, messageCount);
+
+      await db.insert(gameEvents).values({
+        type: 'CONVERSATION_MESSAGE',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: eventLocationId,
+        payload: {
+          conversation_id: conversationId,
+          message: dialogue.message,
+          emotional_tone: dialogue.emotionalTone,
+        },
+        importance: 0.15,
+        createdAt: new Date(),
+      });
+
+      const effect = await applyRelationshipEffect(
+        db,
+        characterId,
+        targetCharacterId,
+        'CONVERSATION_CONTINUED'
+      );
+      await db.insert(gameEvents).values({
+        type: 'RELATIONSHIP_CHANGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: eventLocationId,
+        payload: { effect: 'CONVERSATION_CONTINUED', before: effect.before, after: effect.after },
+        importance: 0.1,
+        createdAt: new Date(),
+      });
+
+      if (messageCount >= MAX_CONVERSATION_MESSAGES) {
+        await db
+          .update(conversations)
+          .set({ endedAt: new Date() })
+          .where(eq(conversations.id, conversationId));
+
+        await db.insert(gameEvents).values({
+          type: 'CONVERSATION_ENDED',
+          actorCharacterId: characterId,
+          targetCharacterId,
+          locationId: eventLocationId,
+          payload: { conversation_id: conversationId, reason: 'message_cap_reached' },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+      }
       break;
     }
   }

@@ -19,6 +19,7 @@ const baseCtx: AgentDecisionContext = {
   recentMemories: [],
   availableActions: ['IDLE', 'MOVE', 'WORK'],
   visibleCharacters: [],
+  activeConversations: [],
   gameCycleId: 'cycle-1',
   gameDay: 1,
 };
@@ -41,6 +42,33 @@ describe('MockProvider', () => {
       currentDirective: 'accumulate wealth and become rich',
     });
     expect(decision.selected_action).toBe('WORK');
+  });
+
+  it('starts a conversation with a visible character on the social-loop call', async () => {
+    const provider = new MockProvider();
+    await provider.decideAction(baseCtx); // call 1
+    await provider.decideAction(baseCtx); // call 2
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      visibleCharacters: [{ characterId: 'char-2', name: 'Bob' }],
+    }); // call 3 — the social-loop call
+    expect(decision.selected_action).toBe('START_CONVERSATION');
+    expect(decision.target_id).toBe('char-2');
+  });
+
+  it('continues an open conversation instead of starting a new one', async () => {
+    const provider = new MockProvider();
+    await provider.decideAction(baseCtx);
+    await provider.decideAction(baseCtx);
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      visibleCharacters: [{ characterId: 'char-2', name: 'Bob' }],
+      activeConversations: [
+        { conversationId: 'convo-1', otherCharacterName: 'Bob', lastMessage: 'Hello there.' },
+      ],
+    });
+    expect(decision.selected_action).toBe('CONTINUE_CONVERSATION');
+    expect(decision.target_id).toBe('convo-1');
   });
 
   it('throws on simulated malformed output (7th call)', async () => {

@@ -1,0 +1,1 @@
+ALTER TABLE "conversations" ADD COLUMN "participant_ids" jsonb DEFAULT '[]' NOT NULL;

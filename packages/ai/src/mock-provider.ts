@@ -27,6 +27,36 @@ export class MockProvider implements AgentModelProvider {
       throw new Error('MockProvider: simulated malformed/timeout error');
     }
 
+    // Every 3rd call, prefer the social loop over the economic one below
+    // — deterministic, so it actually exercises START_CONVERSATION /
+    // CONTINUE_CONVERSATION end-to-end in dev and tests, not just in
+    // principle. An open conversation always wins over starting a new
+    // one (finish what you started before talking to someone else).
+    if (this.callCount % 3 === 0) {
+      const openConversation = ctx.activeConversations[0];
+      if (openConversation) {
+        return {
+          goal: 'continue the conversation',
+          selected_action: 'CONTINUE_CONVERSATION',
+          target_id: openConversation.conversationId,
+          parameters: {},
+          intent: `Responding to ${openConversation.otherCharacterName}`,
+          priority: 0.6,
+        };
+      }
+      const nearbyCharacter = ctx.visibleCharacters[0];
+      if (nearbyCharacter) {
+        return {
+          goal: 'get to know the people around me',
+          selected_action: 'START_CONVERSATION',
+          target_id: nearbyCharacter.characterId,
+          parameters: { topic: 'general' },
+          intent: `Striking up a conversation with ${nearbyCharacter.name}`,
+          priority: 0.5,
+        };
+      }
+    }
+
     // Vary behavior based on personality traits and directive
     const hasDirective = ctx.currentDirective && ctx.currentDirective.length > 0;
     const isAmbitious = ctx.personalityTraits.some(

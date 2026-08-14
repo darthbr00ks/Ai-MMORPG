@@ -37,6 +37,24 @@ export interface PersonalityTrait {
   weight: number; // 0..1
 }
 
+/** A character visible at the same location — enough for the model to
+ * name a `target_id` for START_CONVERSATION without leaking anything
+ * beyond what a character standing in the same room could observe. */
+export interface VisibleCharacter {
+  characterId: string;
+  name: string;
+}
+
+/** A conversation this character is already part of and can continue
+ * via CONTINUE_CONVERSATION (target_id = conversationId). Carries just
+ * enough of the last exchange for the model to respond in context —
+ * never the full transcript (§5's token-minimization constraint). */
+export interface ActiveConversationSummary {
+  conversationId: string;
+  otherCharacterName: string;
+  lastMessage: string | null;
+}
+
 export interface AgentDecisionContext {
   characterId: string;
   name: string;
@@ -53,7 +71,8 @@ export interface AgentDecisionContext {
   currentGoals: string[];
   recentMemories: string[];
   availableActions: string[];
-  visibleCharacters: string[];
+  visibleCharacters: VisibleCharacter[];
+  activeConversations: ActiveConversationSummary[];
   gameCycleId: string;
   gameDay: number;
 }
@@ -124,6 +143,9 @@ export const GameEventTypes = [
   'ACTION_EXECUTED',
   'ACTION_REJECTED',
   'CHARACTER_IDLE',
+  'CONVERSATION_STARTED',
+  'CONVERSATION_MESSAGE',
+  'CONVERSATION_ENDED',
   'SIMULATION_TICK_STARTED',
   'SIMULATION_TICK_COMPLETED',
 ] as const;

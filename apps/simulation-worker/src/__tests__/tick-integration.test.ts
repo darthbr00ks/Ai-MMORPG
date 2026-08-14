@@ -17,9 +17,21 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, and, or, inArray } from 'drizzle-orm';
 import { schema } from '@ai-world/database';
 import { MockProvider } from '@ai-world/ai';
+import type { AgentModelProvider } from '@ai-world/ai';
+import type {
+  AgentDecision,
+  AgentDecisionContext,
+  DialogueContext,
+  DialogueResult,
+  SummaryContext,
+  SummaryResult,
+  MemoryContext,
+  MemoryResult,
+  ModerationResult,
+} from '@ai-world/shared';
 import { processTick } from '../tick-processor.js';
 
 const DB_URL = process.env.DATABASE_URL;
@@ -290,3 +302,234 @@ describe.skipIf(!DB_URL)('processTick — traveling characters count as processe
     expect(after.length).toBe(0);
   });
 });
+
+/**
+ * A deterministic stand-in for MockProvider, used only by the
+ * conversation test below. MockProvider's social-loop cadence
+ * (§ mock-provider.ts, "every 3rd call") is keyed off a call counter
+ * shared across every character processTick touches in a single tick —
+ * coupling a test's pass/fail to that counter would make the test
+ * fragile against unrelated seed data or ordering, not against the
+ * conversation feature itself. This provider always starts/continues a
+ * conversation when one is available, so the test only depends on
+ * tick-processor's own wiring.
+ */
+class AlwaysConverseProvider implements AgentModelProvider {
+  async decideAction(ctx: AgentDecisionContext): Promise<AgentDecision> {
+    const openConversation = ctx.activeConversations[0];
+    if (openConversation) {
+      return {
+        goal: 'continue the conversation',
+        selected_action: 'CONTINUE_CONVERSATION',
+        target_id: openConversation.conversationId,
+        parameters: {},
+        intent: 'responding',
+        priority: 0.5,
+      };
+    }
+    const nearbyCharacter = ctx.visibleCharacters[0];
+    if (nearbyCharacter) {
+      return {
+        goal: 'start a conversation',
+        selected_action: 'START_CONVERSATION',
+        target_id: nearbyCharacter.characterId,
+        parameters: { topic: 'greetings' },
+        intent: 'starting a conversation',
+        priority: 0.5,
+      };
+    }
+    return {
+      goal: 'wait',
+      selected_action: 'IDLE',
+      target_id: null,
+      parameters: {},
+      intent: 'nobody around to talk to',
+      priority: 0.1,
+    };
+  }
+
+  async generateDialogue(_ctx: DialogueContext): Promise<DialogueResult> {
+    return { message: 'Well met, friend.', emotionalTone: 'friendly' };
+  }
+
+  async summarizeEvents(_ctx: SummaryContext): Promise<SummaryResult> {
+    return { summary: '' };
+  }
+
+  async extractMemory(_ctx: MemoryContext): Promise<MemoryResult> {
+    return { extractedMemories: [] };
+  }
+
+  async moderateDirective(_text: string): Promise<ModerationResult> {
+    return { status: 'accepted', reason_category: '' };
+  }
+}
+
+describe.skipIf(!DB_URL)(
+  'processTick — two characters at the same location converse',
+  () => {
+    let client: ReturnType<typeof postgres>;
+    let db: ReturnType<typeof drizzle<typeof schema>>;
+    let locationId: string;
+    let characterAId: string;
+    let characterBId: string;
+
+    beforeAll(async () => {
+      client = postgres(DB_URL!);
+      db = drizzle(client, { schema });
+
+      const [location] = await db
+        .insert(schema.locations)
+        .values({
+          name: 'Conversation Test Square',
+          slug: `conversation-test-square-${Date.now()}`,
+          description: 'A test location',
+          connections: [],
+        })
+        .returning({ id: schema.locations.id });
+      locationId = location.id;
+
+      const [charA] = await db
+        .insert(schema.characters)
+        .values({
+          name: 'Conversationalist A',
+          age: 28,
+          background: 'A character created to test conversations.',
+          personalityTraits: [],
+          skills: [],
+          ambitions: [],
+          archetype: 'socialite',
+        })
+        .returning({ id: schema.characters.id });
+      characterAId = charA.id;
+
+      const [charB] = await db
+        .insert(schema.characters)
+        .values({
+          name: 'Conversationalist B',
+          age: 31,
+          background: 'A character created to test conversations.',
+          personalityTraits: [],
+          skills: [],
+          ambitions: [],
+          archetype: 'socialite',
+        })
+        .returning({ id: schema.characters.id });
+      characterBId = charB.id;
+
+      for (const characterId of [characterAId, characterBId]) {
+        await db.insert(schema.characterState).values({
+          characterId,
+          locationId,
+          health: 100,
+          fatigue: 0,
+          status: 'idle',
+        });
+        await db.insert(schema.wallets).values({ characterId, balanceCents: 1000 });
+      }
+    });
+
+    afterAll(async () => {
+      const bothIds = [characterAId, characterBId];
+      const ownDecisions = await db
+        .select({ id: schema.agentDecisions.id })
+        .from(schema.agentDecisions)
+        .where(inArray(schema.agentDecisions.characterId, bothIds));
+      const decisionIds = ownDecisions.map((d) => d.id);
+
+      const ownConversations = await db.select().from(schema.conversations);
+      const conversationIds = ownConversations
+        .filter((c) =>
+          ((c.participantIds as string[]) ?? []).some((id) => bothIds.includes(id))
+        )
+        .map((c) => c.id);
+
+      if (conversationIds.length > 0) {
+        await db
+          .delete(schema.conversationMessages)
+          .where(inArray(schema.conversationMessages.conversationId, conversationIds));
+        await db.delete(schema.conversations).where(inArray(schema.conversations.id, conversationIds));
+      }
+      await db.delete(schema.relationships).where(
+        or(
+          and(eq(schema.relationships.characterAId, characterAId), eq(schema.relationships.characterBId, characterBId)),
+          and(eq(schema.relationships.characterAId, characterBId), eq(schema.relationships.characterBId, characterAId))
+        )
+      );
+      await db.delete(schema.gameEvents).where(inArray(schema.gameEvents.actorCharacterId, bothIds));
+      await db.delete(schema.aiUsage).where(inArray(schema.aiUsage.characterId, bothIds));
+      if (decisionIds.length > 0) {
+        await db.delete(schema.agentActions).where(inArray(schema.agentActions.decisionId, decisionIds));
+      }
+      await db.delete(schema.agentDecisions).where(inArray(schema.agentDecisions.characterId, bothIds));
+      await db.delete(schema.wallets).where(inArray(schema.wallets.characterId, bothIds));
+      await db.delete(schema.characterState).where(inArray(schema.characterState.characterId, bothIds));
+      await db.delete(schema.characters).where(inArray(schema.characters.id, bothIds));
+      await db.delete(schema.locations).where(eq(schema.locations.id, locationId));
+      await client.end();
+    });
+
+    it('creates a conversation, writes a message, and moves the relationship off neutral', async () => {
+      const result = await processTick(
+        db,
+        new AlwaysConverseProvider(),
+        {
+          gameDayRealSeconds: 300,
+          simulationTickSeconds: 10,
+          dailyBudgetCents: 500,
+          providerName: 'mock',
+          modelName: 'mock',
+        },
+        new Date()
+      );
+
+      expect(result.errors.some((e) => e.includes(characterAId) || e.includes(characterBId))).toBe(
+        false
+      );
+
+      const conversationStartedEvents = await db
+        .select()
+        .from(schema.gameEvents)
+        .where(
+          and(
+            eq(schema.gameEvents.type, 'CONVERSATION_STARTED'),
+            inArray(schema.gameEvents.actorCharacterId, [characterAId, characterBId])
+          )
+        );
+      // Both characters see each other as visible from the same
+      // pre-tick snapshot (§ tick-processor.ts's batch load), so either
+      // or both may initiate — at least one CONVERSATION_STARTED is the
+      // correctness bar, not exactly one.
+      expect(conversationStartedEvents.length).toBeGreaterThanOrEqual(1);
+
+      const relationshipRow = await db
+        .select()
+        .from(schema.relationships)
+        .where(
+          or(
+            and(
+              eq(schema.relationships.characterAId, characterAId),
+              eq(schema.relationships.characterBId, characterBId)
+            ),
+            and(
+              eq(schema.relationships.characterAId, characterBId),
+              eq(schema.relationships.characterBId, characterAId)
+            )
+          )
+        );
+      expect(relationshipRow.length).toBe(1);
+      expect(relationshipRow[0].familiarity).toBeGreaterThan(0);
+
+      const relationshipChangedEvents = await db
+        .select()
+        .from(schema.gameEvents)
+        .where(
+          and(
+            eq(schema.gameEvents.type, 'RELATIONSHIP_CHANGED'),
+            inArray(schema.gameEvents.actorCharacterId, [characterAId, characterBId])
+          )
+        );
+      expect(relationshipChangedEvents.length).toBeGreaterThanOrEqual(1);
+    });
+  }
+);

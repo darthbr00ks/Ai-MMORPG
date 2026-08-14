@@ -15,6 +15,15 @@ export interface CharacterContext {
 export interface WorldState {
   locations: Location[];
   currentGameDay: number;
+  /** Character ids visible to this character right now (same location,
+   * not traveling, excluding self) — required to validate
+   * START_CONVERSATION. Optional so every existing WORK/MOVE/IDLE call
+   * site and test stays valid without updating them. */
+  charactersAtSameLocation?: string[];
+  /** Conversation ids this character currently has open (not yet
+   * ended) — required to validate CONTINUE_CONVERSATION. Same
+   * optionality rationale as above. */
+  activeConversationIds?: string[];
 }
 
 export interface ValidationReport {
@@ -64,6 +73,46 @@ export function validateAction(
       }
       if (character.status === 'traveling') {
         return { valid: false, reason: 'Cannot work while traveling' };
+      }
+      return { valid: true };
+    }
+
+    case 'START_CONVERSATION': {
+      if (character.status === 'traveling') {
+        return { valid: false, reason: 'Cannot start a conversation while traveling' };
+      }
+      if (!action.target_id) {
+        return {
+          valid: false,
+          reason: 'START_CONVERSATION requires a target_id (the other character\'s id)',
+        };
+      }
+      if (action.target_id === character.id) {
+        return { valid: false, reason: 'Cannot start a conversation with yourself' };
+      }
+      const visibleIds = world.charactersAtSameLocation ?? [];
+      if (!visibleIds.includes(action.target_id)) {
+        return {
+          valid: false,
+          reason: `Character '${action.target_id}' is not visible at your current location`,
+        };
+      }
+      return { valid: true };
+    }
+
+    case 'CONTINUE_CONVERSATION': {
+      if (!action.target_id) {
+        return {
+          valid: false,
+          reason: 'CONTINUE_CONVERSATION requires a target_id (the conversation\'s id)',
+        };
+      }
+      const openIds = world.activeConversationIds ?? [];
+      if (!openIds.includes(action.target_id)) {
+        return {
+          valid: false,
+          reason: `No open conversation '${action.target_id}' for this character`,
+        };
       }
       return { valid: true };
     }

@@ -276,6 +276,13 @@ export const relationships = pgTable('relationships', {
 export const conversations = pgTable('conversations', {
   id: uuid('id').primaryKey().defaultRandom(),
   locationId: uuid('location_id').references(() => locations.id),
+  // Character IDs taking part (pairwise for Phase 10; jsonb array leaves
+  // room for group conversations later without a schema change). This is
+  // how a tick knows "does character X have an open conversation to
+  // continue" — conversation_messages alone can't answer that, since a
+  // character can be a conversation's target before they've sent a
+  // message of their own.
+  participantIds: jsonb('participant_ids').notNull().default('[]'),
   startedAt: timestamp('started_at').defaultNow().notNull(),
   endedAt: timestamp('ended_at'),
   visibility: conversationVisibilityEnum('visibility')
