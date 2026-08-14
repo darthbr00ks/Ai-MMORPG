@@ -1,4 +1,4 @@
-import { eq, and, isNull, inArray } from 'drizzle-orm';
+import { eq, and, isNull, inArray, desc } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import {
   characters,
@@ -13,10 +13,12 @@ import {
   aiUsage,
   conversations,
   conversationMessages,
+  memories,
 } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
 import { validateAction, applyRelationshipEffect, getRelationship } from '@ai-world/game-engine';
 import { creditWallet } from '@ai-world/game-engine';
+import { extractDailyMemories } from './memory-extraction.js';
 import type {
   AgentDecision,
   AgentDecisionContext,
@@ -67,6 +69,33 @@ export async function processTick(
       .values({ dayNumber: gameTime.day, startedAt: new Date() })
       .returning({ id: gameCycles.id });
     cycleId = newCycle.id;
+
+    // A new day just started — the natural once-per-day hook for
+    // memory extraction (§5/§8: periodic, NOT per decision tick). Runs
+    // synchronously so ai_usage/cost for it is attributed to the day
+    // that just ended before this tick moves on to today's decisions.
+    //
+    // Only extracts the single day immediately prior — if the worker
+    // was offline long enough to skip multiple day boundaries (over a
+    // full GAME_DAY_REAL_SECONDS), the memories for the skipped days
+    // in between are not backfilled. That day's game_events are never
+    // lost, only the memory summarization of them; an outage long
+    // enough to trigger this is already an ops incident worth its own
+    // attention, and a bounded catch-up loop here is more complexity
+    // than an alpha needs (§16: "don't build mature-world infra during
+    // alpha").
+    if (gameTime.day > 0) {
+      const memoryResult = await extractDailyMemories(
+        db,
+        provider,
+        gameTime.day - 1,
+        config.providerName,
+        config.modelName,
+        cycleStartedAt,
+        config.gameDayRealSeconds
+      );
+      errors.push(...memoryResult.errors.map((e) => `[daily-memory-extraction] ${e}`));
+    }
   }
 
   // Load all locations for movement validation
@@ -181,6 +210,32 @@ export async function processTick(
       const existing = activeConversationsByCharacterId.get(participantId) ?? [];
       existing.push(summary);
       activeConversationsByCharacterId.set(participantId, existing);
+    }
+  }
+
+  // Most recent memories per character, capped client-side (§5's
+  // token-minimization constraint: decision context gets a bounded
+  // slice, never the full memory table). One query for the whole
+  // world rather than one per character — fine at alpha's 20-
+  // character scale; revisit with a per-character indexed/limited
+  // query if the memory table grows large enough for this to matter.
+  const MAX_RECENT_MEMORIES_PER_CHARACTER = 5;
+  const RECENT_MEMORY_QUERY_CAP = 1000;
+  const recentMemoryRows = await db
+    .select({ characterId: memories.characterId, content: memories.content })
+    .from(memories)
+    .orderBy(desc(memories.createdAt))
+    .limit(RECENT_MEMORY_QUERY_CAP);
+
+  const recentMemoriesByCharacterId = new Map<string, string[]>();
+  for (const row of recentMemoryRows) {
+    const list = recentMemoriesByCharacterId.get(row.characterId) ?? [];
+    // recentMemoryRows is globally sorted newest-first, so each
+    // character's subsequence, taken in encounter order, is already
+    // that character's own newest-first list.
+    if (list.length < MAX_RECENT_MEMORIES_PER_CHARACTER) {
+      list.push(row.content);
+      recentMemoriesByCharacterId.set(row.characterId, list);
     }
   }
 
@@ -305,7 +360,7 @@ export async function processTick(
         status: currentState.status,
         walletCents: wallet?.balanceCents || 0,
         currentGoals: (char.ambitions as string[]) || [],
-        recentMemories: [],
+        recentMemories: recentMemoriesByCharacterId.get(char.id) ?? [],
         availableActions: ['IDLE', 'MOVE', 'WORK', 'START_CONVERSATION', 'CONTINUE_CONVERSATION'],
         visibleCharacters,
         activeConversations,
