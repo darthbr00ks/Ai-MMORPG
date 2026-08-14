@@ -11,5 +11,12 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   transpilePackages: ['@ai-world/shared', '@ai-world/database', '@ai-world/game-engine'],
+  // Produces .next/standalone — a self-contained server bundle with
+  // only the node_modules Next's build tracer determined are actually
+  // required, instead of the full workspace node_modules tree. This
+  // is what keeps the Phase 16 Docker image (apps/web/Dockerfile)
+  // small and avoids re-solving pnpm's node_modules layout inside the
+  // final image.
+  output: 'standalone',
 };
 module.exports = nextConfig;
