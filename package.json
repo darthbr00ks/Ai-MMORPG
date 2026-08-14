@@ -10,7 +10,8 @@
     "test:live": "turbo run test:live",
     "db:generate": "turbo run db:generate --filter=@ai-world/database",
     "db:migrate": "turbo run db:migrate --filter=@ai-world/database",
-    "db:seed": "turbo run db:seed --filter=@ai-world/database"
+    "db:seed": "turbo run db:seed --filter=@ai-world/database",
+    "db:fix-jsonb-double-encoding": "turbo run db:fix-jsonb-double-encoding --filter=@ai-world/database"
   },
   "devDependencies": {
     "turbo": "^2.0.0",
