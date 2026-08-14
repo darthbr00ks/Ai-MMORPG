@@ -28,7 +28,10 @@ async function getActiveCharacters(): Promise<CharacterRow[]> {
       .leftJoin(schema.locations, eq(schema.characterState.locationId, schema.locations.id))
       .orderBy(schema.characters.name)
       .limit(20);
-  } catch {
+  } catch (err) {
+    // Same rationale as the characters list page: a real DB outage
+    // must not look identical to "no characters yet" in the UI.
+    console.error('[spectate] failed to load character list:', err);
     return [];
   }
 }
@@ -38,7 +41,15 @@ export default async function SpectatePage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold">Spectate — New Concord Live</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold">Spectate — New Concord Live</h2>
+        <a
+          href="/spectate/broadcast"
+          className="text-sm text-amber-400 hover:text-amber-300 border border-amber-800 rounded px-3 py-1"
+        >
+          Open broadcast view ↗
+        </a>
+      </div>
       <div className="grid md:grid-cols-3 gap-6">
         <div className="md:col-span-2">
           <h3 className="text-lg font-semibold mb-3">Live Events</h3>

@@ -5,7 +5,10 @@ import { useEffect, useState } from 'react';
 interface GameEvent {
   id: string;
   type: string;
-  actorName?: string;
+  actorName?: string | null;
+  targetName?: string | null;
+  locationName?: string | null;
+  description?: string;
   importance: number;
   createdAt: string;
   payload: Record<string, unknown>;
@@ -69,10 +72,15 @@ export default function EventFeed() {
               </span>
               <div className="flex-1 min-w-0">
                 {event.actorName && (
-                  <span className="text-amber-300 text-sm font-medium">{event.actorName}</span>
+                  <span className="text-amber-300 text-sm font-medium">
+                    {event.actorName}
+                    {event.targetName && (
+                      <span className="text-gray-500 font-normal"> → {event.targetName}</span>
+                    )}
+                  </span>
                 )}
                 <p className="text-gray-300 text-sm truncate">
-                  {JSON.stringify(event.payload).slice(0, 80)}
+                  {event.description ?? JSON.stringify(event.payload).slice(0, 80)}
                 </p>
               </div>
               <span className="text-gray-600 text-xs whitespace-nowrap">
