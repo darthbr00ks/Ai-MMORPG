@@ -1,6 +1,12 @@
 import { z } from 'zod';
 
-export const ACTION_NAMES = ['IDLE', 'MOVE', 'WORK'] as const;
+export const ACTION_NAMES = [
+  'IDLE',
+  'MOVE',
+  'WORK',
+  'START_CONVERSATION',
+  'CONTINUE_CONVERSATION',
+] as const;
 
 export type ActionName = (typeof ACTION_NAMES)[number];
 
@@ -29,6 +35,20 @@ export const ACTION_REGISTRY: ActionDefinition[] = [
     description: 'Work at current location if employment is available.',
     requiresTarget: false,
     parameters: ['job_type'],
+  },
+  {
+    name: 'START_CONVERSATION',
+    description:
+      'Begin talking with another character who is visible at your current location. target_id must be that character\'s id.',
+    requiresTarget: true,
+    parameters: ['topic'],
+  },
+  {
+    name: 'CONTINUE_CONVERSATION',
+    description:
+      'Continue a conversation you are already part of. target_id must be the conversation\'s id.',
+    requiresTarget: true,
+    parameters: ['message_intent'],
   },
 ];
 

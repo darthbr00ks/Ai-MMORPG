@@ -144,3 +144,129 @@ describe('validateAction - WORK', () => {
     expect(result.valid).toBe(false);
   });
 });
+
+describe('validateAction - START_CONVERSATION', () => {
+  const worldWithVisibleCharacter = {
+    ...worldState,
+    charactersAtSameLocation: ['char-2'],
+  };
+
+  it('accepts starting a conversation with a visible character', () => {
+    const action: AgentDecision = {
+      goal: 'socialize',
+      selected_action: 'START_CONVERSATION',
+      target_id: 'char-2',
+      parameters: { topic: 'the harvest' },
+      intent: 'greeting a neighbor',
+      priority: 0.4,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacter);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects without a target_id', () => {
+    const action: AgentDecision = {
+      goal: 'socialize',
+      selected_action: 'START_CONVERSATION',
+      target_id: null,
+      parameters: {},
+      intent: 'greeting a neighbor',
+      priority: 0.4,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacter);
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects talking to yourself', () => {
+    const action: AgentDecision = {
+      goal: 'socialize',
+      selected_action: 'START_CONVERSATION',
+      target_id: baseChar.id,
+      parameters: {},
+      intent: 'greeting a neighbor',
+      priority: 0.4,
+    };
+    const result = validateAction(
+      action,
+      baseChar,
+      { ...worldState, charactersAtSameLocation: [baseChar.id] }
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects a target character not at the same location', () => {
+    const action: AgentDecision = {
+      goal: 'socialize',
+      selected_action: 'START_CONVERSATION',
+      target_id: 'char-far-away',
+      parameters: {},
+      intent: 'greeting a neighbor',
+      priority: 0.4,
+    };
+    const result = validateAction(action, baseChar, worldWithVisibleCharacter);
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects starting a conversation while traveling', () => {
+    const action: AgentDecision = {
+      goal: 'socialize',
+      selected_action: 'START_CONVERSATION',
+      target_id: 'char-2',
+      parameters: {},
+      intent: 'greeting a neighbor',
+      priority: 0.4,
+    };
+    const result = validateAction(
+      action,
+      { ...baseChar, status: 'traveling' },
+      worldWithVisibleCharacter
+    );
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe('validateAction - CONTINUE_CONVERSATION', () => {
+  const worldWithOpenConversation = {
+    ...worldState,
+    activeConversationIds: ['convo-1'],
+  };
+
+  it('accepts continuing an open conversation', () => {
+    const action: AgentDecision = {
+      goal: 'keep talking',
+      selected_action: 'CONTINUE_CONVERSATION',
+      target_id: 'convo-1',
+      parameters: {},
+      intent: 'responding',
+      priority: 0.4,
+    };
+    const result = validateAction(action, baseChar, worldWithOpenConversation);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects a conversation id this character does not have open', () => {
+    const action: AgentDecision = {
+      goal: 'keep talking',
+      selected_action: 'CONTINUE_CONVERSATION',
+      target_id: 'convo-does-not-exist',
+      parameters: {},
+      intent: 'responding',
+      priority: 0.4,
+    };
+    const result = validateAction(action, baseChar, worldWithOpenConversation);
+    expect(result.valid).toBe(false);
+  });
+
+  it('rejects without a target_id', () => {
+    const action: AgentDecision = {
+      goal: 'keep talking',
+      selected_action: 'CONTINUE_CONVERSATION',
+      target_id: null,
+      parameters: {},
+      intent: 'responding',
+      priority: 0.4,
+    };
+    const result = validateAction(action, baseChar, worldWithOpenConversation);
+    expect(result.valid).toBe(false);
+  });
+});

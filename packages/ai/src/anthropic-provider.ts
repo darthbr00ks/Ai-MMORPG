@@ -279,6 +279,7 @@ RULES:
       current_goals: ctx.currentGoals,
       recent_memories: ctx.recentMemories.slice(0, 5),
       visible_characters: ctx.visibleCharacters.slice(0, 10),
+      active_conversations: ctx.activeConversations.slice(0, 5),
       game_day: ctx.gameDay,
     });
   }

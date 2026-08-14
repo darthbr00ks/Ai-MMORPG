@@ -15,6 +15,13 @@
       "when": 1786652632472,
       "tag": "0001_low_doorman",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786668513505,
+      "tag": "0002_clammy_rage",
+      "breakpoints": true
     }
   ]
 }
