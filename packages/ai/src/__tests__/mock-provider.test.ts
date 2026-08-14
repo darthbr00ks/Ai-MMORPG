@@ -11,6 +11,7 @@ const baseCtx: AgentDecisionContext = {
   ambitions: ['test goal'],
   currentDirective: null,
   currentLocation: 'town-square',
+  connectedLocationSlugs: ['tavern', 'market', 'city-hall', 'residential-district'],
   health: 100,
   fatigue: 0,
   status: 'idle',
@@ -92,6 +93,49 @@ describe('MockProvider', () => {
     const provider = new MockProvider();
     const result = await provider.moderateDirective('kill all citizens');
     expect(result.status).toBe('rejected');
+  });
+
+  it('never proposes a MOVE target outside connectedLocationSlugs (regression: used to hardcode town-square/tavern regardless of reachability)', async () => {
+    const provider = new MockProvider();
+    // ambitious + not at city-hall -> the MOVE branch, same as baseCtx,
+    // but standing somewhere that does NOT connect to town-square at
+    // all (mirrors the real seed data's 'bank'/'mine' locations, which
+    // caused ~5,580 real ACTION_REJECTED events before this fix — see
+    // docs/architecture.md).
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      currentLocation: 'bank',
+      connectedLocationSlugs: ['city-hall', 'market'],
+    });
+    if (decision.selected_action === 'MOVE') {
+      expect(['city-hall', 'market']).toContain(decision.target_id);
+    } else {
+      // The only other acceptable outcome when nothing reachable makes
+      // sense to propose — never a MOVE to an unreachable location.
+      expect(decision.selected_action).toBe('IDLE');
+    }
+  });
+
+  it('prefers town-square as the MOVE destination when it is reachable', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      currentLocation: 'residential-district',
+      connectedLocationSlugs: ['town-square', 'tavern', 'warehouse-district'],
+    });
+    expect(decision.selected_action).toBe('MOVE');
+    expect(decision.target_id).toBe('town-square');
+  });
+
+  it('falls back to IDLE rather than proposing an impossible MOVE from an isolated location', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      currentLocation: 'isolated-test-location',
+      connectedLocationSlugs: [],
+    });
+    expect(decision.selected_action).toBe('IDLE');
+    expect(decision.target_id).toBeNull();
   });
 
   it('generates dialogue', async () => {

@@ -74,6 +74,17 @@ export interface AgentDecisionContext {
   ambitions: string[];
   currentDirective: string | null;
   currentLocation: string;
+  // The ONLY destinations a MOVE from currentLocation can actually
+  // validate against (action-validator.ts's isLocationConnected checks
+  // exactly this list, one-directional — a location being IN another's
+  // connections list does not imply the reverse). Without this, nothing
+  // in the decision context tells the model which MOVE targets are
+  // reachable from here, so it can only find out by guessing and
+  // getting an ACTION_REJECTED back — a real, wasted AI call under
+  // AnthropicProvider, not just a MockProvider quirk that ended up
+  // stuck against a location with no direct path back to town-square
+  // (`bank`/`mine` in the seed data — see docs/architecture.md).
+  connectedLocationSlugs: string[];
   health: number;
   fatigue: number;
   status: CharacterStatus;

@@ -391,6 +391,10 @@ export async function processTick(
         ambitions: (char.ambitions as string[]) || [],
         currentDirective: activeDirective?.text || null,
         currentLocation: currentLocation?.slug || 'unknown',
+        // Straight from the already-batch-loaded locationMap — the
+        // exact list isLocationConnected checks a MOVE target_id
+        // against, so the model never has to guess-and-get-rejected.
+        connectedLocationSlugs: (currentLocation?.connections as string[] | undefined) ?? [],
         health: currentState.health,
         fatigue: currentState.fatigue,
         status: currentState.status,

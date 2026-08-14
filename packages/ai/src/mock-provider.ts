@@ -21,6 +21,27 @@ const ZERO_USAGE: AiCallUsage = {
 };
 
 /**
+ * Deterministically picks a MOVE target from the locations actually
+ * reachable from here (connections are one-directional — see
+ * AgentDecisionContext.connectedLocationSlugs' doc comment). Prefers
+ * 'town-square' when it's reachable (the social/economic hub most
+ * locations connect to), otherwise falls back to the first other
+ * connection, so the same inputs always produce the same output.
+ * Returns null only when nothing is reachable at all (an isolated
+ * location) — the caller falls back to IDLE rather than proposing a
+ * MOVE the engine can only reject.
+ */
+function pickMoveDestination(
+  currentLocationSlug: string,
+  connectedLocationSlugs: string[]
+): string | null {
+  if (connectedLocationSlugs.includes('town-square') && currentLocationSlug !== 'town-square') {
+    return 'town-square';
+  }
+  return connectedLocationSlugs.find((slug) => slug !== currentLocationSlug) ?? null;
+}
+
+/**
  * MockProvider: deterministic canned responses for testing.
  * Includes occasional malformed output to exercise the fallback path.
  * Zero cost — default provider.
@@ -104,11 +125,21 @@ export class MockProvider implements AgentModelProvider {
       intent = `Buying ${ctx.availableMarketItems[0].name.toLowerCase()} at the market`;
     }
 
-    // For MOVE, use the first visible character's location or a safe default.
-    // Fall back to WORK if already at town-square (can't always move there).
     if (action === 'MOVE') {
-      const destination =
-        ctx.currentLocation !== 'town-square' ? 'town-square' : 'tavern';
+      const destination = pickMoveDestination(ctx.currentLocation, ctx.connectedLocationSlugs);
+      if (!destination) {
+        // Nothing reachable from here (an isolated location, e.g. a
+        // fixture with no seeded connections) — any MOVE target would
+        // be rejected by the engine, so don't propose one at all.
+        return {
+          goal: 'rest and observe',
+          selected_action: 'IDLE',
+          target_id: null,
+          parameters: {},
+          intent: 'No reachable destination from here — waiting instead',
+          priority: 0.3,
+        };
+      }
       return {
         goal,
         selected_action: 'MOVE',
