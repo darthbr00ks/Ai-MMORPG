@@ -27,6 +27,7 @@ import {
 } from '@ai-world/game-engine';
 import { creditWallet, debitWallet, transferMoney } from '@ai-world/game-engine';
 import { extractDailyMemories } from './memory-extraction.js';
+import { generateDailyReports } from './daily-report.js';
 import type {
   AgentDecision,
   AgentDecisionContext,
@@ -104,6 +105,19 @@ export async function processTick(
         config.gameDayRealSeconds
       );
       errors.push(...memoryResult.errors.map((e) => `[daily-memory-extraction] ${e}`));
+
+      // Same once-per-day hook, same day, same "don't backfill a
+      // multi-day outage" limitation as the memory pass above.
+      const reportResult = await generateDailyReports(
+        db,
+        provider,
+        gameTime.day - 1,
+        config.providerName,
+        config.modelName,
+        cycleStartedAt,
+        config.gameDayRealSeconds
+      );
+      errors.push(...reportResult.errors.map((e) => `[daily-report] ${e}`));
     }
   }
 

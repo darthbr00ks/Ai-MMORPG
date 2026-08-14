@@ -2,7 +2,7 @@ import { and, desc, eq, gte, lte } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import { aiUsage, characters, gameCycles, gameEvents, memories } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
-import { gameDayRealTimeWindow } from '@ai-world/shared';
+import { gameDayRealTimeWindow, describeGameEvent } from '@ai-world/shared';
 
 // Bounds on what goes INTO an extractMemory call — §5's token-
 // minimization constraint applies to memory extraction the same as
@@ -10,35 +10,6 @@ import { gameDayRealTimeWindow } from '@ai-world/shared';
 // importance-ranked slice.
 const MAX_EVENTS_PER_CHARACTER_PER_DAY = 30;
 const MAX_EXISTING_MEMORIES_FOR_CONTEXT = 5;
-
-/**
- * Turns a raw GameEvent into the one-line, human-readable form
- * extractMemory (and eventually a human-facing daily report) expects —
- * the model summarizes narrative, it never sees raw payload JSON.
- */
-function describeEvent(event: { type: string; payload: unknown }): string {
-  const payload = (event.payload ?? {}) as Record<string, unknown>;
-  switch (event.type) {
-    case 'CHARACTER_MOVED':
-      return `Moved to ${payload.to_location_name ?? payload.destination ?? 'a new location'}.`;
-    case 'MONEY_EARNED':
-      return `Earned ${payload.amount_cents ?? 0} cents working.`;
-    case 'CONVERSATION_STARTED':
-      return `Started a conversation: "${payload.message ?? ''}"`;
-    case 'CONVERSATION_MESSAGE':
-      return `Said: "${payload.message ?? ''}"`;
-    case 'CONVERSATION_ENDED':
-      return 'A conversation came to an end.';
-    case 'RELATIONSHIP_CHANGED':
-      return `A relationship shifted (${payload.effect ?? 'an interaction'}).`;
-    case 'ACTION_REJECTED':
-      return `Tried something that didn't work out: ${payload.reason ?? 'unknown reason'}.`;
-    case 'CHARACTER_IDLE':
-      return 'Rested and observed the world.';
-    default:
-      return event.type.replace(/_/g, ' ').toLowerCase();
-  }
-}
 
 export interface DailyMemoryExtractionResult {
   charactersProcessed: number;
@@ -137,7 +108,7 @@ export async function extractDailyMemories(
       const startMs = Date.now();
       const result = await provider.extractMemory({
         characterId: char.id,
-        recentEvents: dayEvents.map(describeEvent),
+        recentEvents: dayEvents.map(describeGameEvent),
         existingMemories: existingMemoryRows.map((m) => m.content),
         // Falls back to an empty string on the days that never got a
         // game_cycles row (see the module doc comment) — providers
