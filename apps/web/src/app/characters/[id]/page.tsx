@@ -51,6 +51,15 @@ async function getRecentDecisions(characterId: string) {
     .limit(10);
 }
 
+async function getRecentDailyReports(characterId: string) {
+  return getDb()
+    .select()
+    .from(schema.dailyReports)
+    .where(eq(schema.dailyReports.characterId, characterId))
+    .orderBy(desc(schema.dailyReports.gameDay))
+    .limit(5);
+}
+
 type Directive = {
   id: string;
   text: string;
@@ -65,6 +74,14 @@ type Decision = {
   latencyMs: number | null;
 };
 
+type DailyReport = {
+  id: string;
+  gameDay: number;
+  summary: string;
+  eventCount: number;
+  createdAt: Date;
+};
+
 export default async function CharacterDetailPage({
   params,
 }: {
@@ -75,9 +92,10 @@ export default async function CharacterDetailPage({
     return <div className="text-red-400">Character not found</div>;
   }
 
-  const [directiveHistory, recentDecisions] = await Promise.all([
+  const [directiveHistory, recentDecisions, recentDailyReports] = await Promise.all([
     getDirectiveHistory(params.id) as Promise<Directive[]>,
     getRecentDecisions(params.id) as Promise<Decision[]>,
+    getRecentDailyReports(params.id) as Promise<DailyReport[]>,
   ]);
 
   const traits = (char.personalityTraits as Array<{ trait: string; weight: number }>) || [];
@@ -164,6 +182,28 @@ export default async function CharacterDetailPage({
       </div>
 
       <DirectiveForm characterId={params.id} />
+
+      {recentDailyReports.length > 0 && (
+        <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
+          <h3 className="font-semibold mb-3">Daily Reports</h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Generated once per game day, from this character&apos;s actual recorded events only.
+          </p>
+          <div className="space-y-3">
+            {recentDailyReports.map((r: DailyReport) => (
+              <div key={r.id} className="text-sm p-3 rounded bg-gray-800">
+                <div className="flex justify-between items-baseline mb-1">
+                  <span className="text-amber-400 font-semibold">Day {r.gameDay}</span>
+                  <span className="text-xs text-gray-500">
+                    summarized from {r.eventCount} event{r.eventCount === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <p className="text-gray-200">{r.summary}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {directiveHistory.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">

@@ -357,3 +357,19 @@ export const auditLog = pgTable('audit_log', {
   payload: jsonb('payload').default('{}'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+// Phase 13: one report per character per completed game day, generated
+// by the strong model from that day's actual game_events rows only —
+// never fabricated (§16). eventCount is stored alongside the prose so
+// the UI/admin console can show "summarized from N events" without
+// re-querying game_events.
+export const dailyReports = pgTable('daily_reports', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  characterId: uuid('character_id')
+    .notNull()
+    .references(() => characters.id),
+  gameDay: integer('game_day').notNull(),
+  summary: text('summary').notNull(),
+  eventCount: integer('event_count').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
