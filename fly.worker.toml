@@ -1,0 +1,45 @@
+# Fly.io app config for apps/simulation-worker (§9/§16: "the worker is
+# long-running; serverless can't host it" — this is the one piece of
+# this system that structurally cannot move to Vercel/a serverless
+# platform later, unlike apps/web). No [http_service]/[[services]]
+# block: this process serves no traffic, it's a long-running tick
+# loop, so there's nothing for Fly's proxy to route to.
+#
+# Deploy from the REPO ROOT, same reasoning as fly.web.toml:
+#
+#   fly launch --config fly.worker.toml --no-deploy   # first time only
+#   fly deploy --config fly.worker.toml
+
+app = "ai-world-worker"
+primary_region = "iad" # match fly.web.toml / your Postgres region
+
+[build]
+  dockerfile = "apps/simulation-worker/Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  GAME_DAY_REAL_SECONDS = "86400"   # §12: 300 is the dev-only value
+  SIMULATION_TICK_SECONDS = "1800"  # §12: 10 is the dev-only value
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# No [http_service] — Fly still needs at least one machine kept
+# running for a backgroundworker-shaped app; set this explicitly
+# rather than relying on autostop/autostart defaults meant for
+# request-driven services:
+[processes]
+  app = "node apps/simulation-worker/dist/index.js"
+
+# Secrets (never put these here — this file is committed to git):
+#   fly secrets set --config fly.worker.toml \
+#     DATABASE_URL=... \
+#     REDIS_URL=... \
+#     AUTH_SECRET=$(openssl rand -base64 32) \
+#     ANTHROPIC_API_KEY=...          # only if AI_USE_LIVE=true
+#
+# AUTH_SECRET isn't used by the worker's own logic, but
+# packages/shared's loadConfig() validates it as required (shared env
+# schema, §17) — set it to the SAME value as fly.web.toml's so a
+# config typo can't silently diverge between the two apps.

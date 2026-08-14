@@ -1,0 +1,51 @@
+# Fly.io app config for apps/web (§9/§16 of the build plan: "Deploy:
+# Docker Compose local -> Fly.io hosted"). Deploy from the REPO ROOT
+# (the Dockerfile needs the whole pnpm workspace as build context, not
+# just apps/web/) with:
+#
+#   fly launch --config fly.web.toml --no-deploy   # first time only, creates the app
+#   fly deploy --config fly.web.toml
+#
+# `app` below is a placeholder — Fly app names are globally unique;
+# `fly launch` will prompt for a real one if this is taken.
+
+app = "ai-world-web"
+primary_region = "iad" # pick whatever's nearest your Postgres/Redis
+
+[build]
+  dockerfile = "apps/web/Dockerfile"
+
+[env]
+  PORT = "3000"
+  NODE_ENV = "production"
+  # GAME_DAY_REAL_SECONDS / SIMULATION_TICK_SECONDS aren't read by
+  # apps/web directly, but §12 fixes their production values at
+  # 86400/1800 — set them identically here and in fly.worker.toml so
+  # the web app's game-time math (e.g. /admin's "Game day" display)
+  # agrees with the worker's actual tick cadence.
+  GAME_DAY_REAL_SECONDS = "86400"
+  SIMULATION_TICK_SECONDS = "1800"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # A game people are actively directing needs the dashboard/directive
+  # form reachable without a cold-start delay — unlike a typical
+  # bursty web app, don't let Fly scale this to zero.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Secrets (never put these here — this file is committed to git):
+#   fly secrets set --config fly.web.toml \
+#     DATABASE_URL=... \
+#     REDIS_URL=... \
+#     AUTH_SECRET=$(openssl rand -base64 32) \
+#     GOOGLE_CLIENT_ID=... \
+#     GOOGLE_CLIENT_SECRET=... \
+#     NEXTAUTH_URL=https://<your-app>.fly.dev \
+#     ANTHROPIC_API_KEY=...          # only if AI_USE_LIVE=true

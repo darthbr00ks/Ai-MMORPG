@@ -1,0 +1,24 @@
+# Kept in sync with .gitignore's intent, plus Docker-specific excludes.
+# `turbo prune --docker` (used by apps/web/Dockerfile and
+# apps/simulation-worker/Dockerfile) copies the whole build context
+# into its own stage first — without this, that copy drags along every
+# workspace's node_modules/.next/.turbo output, which is enormous and
+# also stale (the build stages install/build fresh inside the image).
+#
+# Unlike .gitignore, a bare `pattern` in .dockerignore only matches at
+# the build context ROOT — it does NOT recurse into subdirectories the
+# way gitignore's does. Every pattern below needs an explicit `**/`
+# prefix to match inside apps/*/packages/* — a bug caught here by
+# actually running `docker build` and finding a stale
+# tsconfig.tsbuildinfo (bare `*.tsbuildinfo` didn't match
+# packages/database/tsconfig.tsbuildinfo) making `tsc --build` believe
+# a fresh checkout was already compiled and silently emit nothing.
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/*.tsbuildinfo
+**/.env
+**/.env.local
+.git
+**/.DS_Store
