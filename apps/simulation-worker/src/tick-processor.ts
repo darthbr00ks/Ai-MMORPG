@@ -15,6 +15,7 @@ import {
   conversationMessages,
   memories,
   items,
+  inventory,
 } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
 import {
@@ -34,6 +35,7 @@ import type {
   ActiveConversationSummary,
   VisibleCharacter,
   AvailableMarketItem,
+  InventoryItemSummary,
 } from '@ai-world/shared';
 import { AgentDecisionSchema } from '@ai-world/shared';
 import { gameTimeNow } from '@ai-world/shared';
@@ -162,6 +164,29 @@ export async function processTick(
     name: i.name,
     basePriceCents: i.basePriceCents,
   }));
+
+  // Every character's own holdings — the ONLY items SELL_ITEM/GIVE_ITEM
+  // can reference without a wasted, blind-guess ACTION_REJECTED (see
+  // InventoryItemSummary's doc comment). One query for the whole world,
+  // same batching rationale as everything else in this section — 20+
+  // characters would otherwise mean 20+ extra round trips.
+  const allInventoryRows = await db
+    .select({
+      characterId: inventory.characterId,
+      itemId: inventory.itemId,
+      quantity: inventory.quantity,
+    })
+    .from(inventory);
+
+  const inventoryByCharacterId = new Map<string, InventoryItemSummary[]>();
+  for (const row of allInventoryRows) {
+    if (row.quantity <= 0) continue; // a fully sold/given-away item — nothing to offer
+    const item = itemById.get(row.itemId);
+    if (!item) continue; // orphaned row referencing a deleted item — nothing to show
+    const list = inventoryByCharacterId.get(row.characterId) ?? [];
+    list.push({ itemId: row.itemId, name: item.name, quantity: row.quantity });
+    inventoryByCharacterId.set(row.characterId, list);
+  }
 
   // --- Conversation visibility & context (§5, §10) ---------------------
   // Batch-loaded once per tick rather than per character: with 20+
@@ -415,6 +440,7 @@ export async function processTick(
         visibleCharacters,
         activeConversations,
         availableMarketItems,
+        inventory: inventoryByCharacterId.get(char.id) ?? [],
         gameCycleId: cycleId,
         gameDay: gameTime.day,
       };

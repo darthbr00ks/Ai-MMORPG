@@ -22,6 +22,7 @@ const baseCtx: AgentDecisionContext = {
   visibleCharacters: [],
   activeConversations: [],
   availableMarketItems: [],
+  inventory: [],
   gameCycleId: 'cycle-1',
   gameDay: 1,
 };
@@ -136,6 +137,47 @@ describe('MockProvider', () => {
     });
     expect(decision.selected_action).toBe('IDLE');
     expect(decision.target_id).toBeNull();
+  });
+
+  it('sells an item actually held in inventory rather than fabricating one (regression: SELL_ITEM had no branch at all before this)', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      personalityTraits: [], // not ambitious — isolates the market/SELL_ITEM branch from the ambitious/MOVE one
+      currentLocation: 'market',
+      inventory: [{ itemId: 'item-iron-ore', name: 'Iron Ore', quantity: 3 }],
+    });
+    expect(decision.selected_action).toBe('SELL_ITEM');
+    expect(decision.target_id).toBe('item-iron-ore');
+    expect(decision.parameters?.quantity).toBe(1);
+  });
+
+  it('buys from the market catalog when at the market with nothing to sell', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      personalityTraits: [],
+      currentLocation: 'market',
+      inventory: [],
+      availableMarketItems: [{ itemId: 'item-grain', name: 'Grain', basePriceCents: 50 }],
+    });
+    expect(decision.selected_action).toBe('BUY_ITEM');
+    expect(decision.target_id).toBe('item-grain');
+  });
+
+  it('gives an item actually held in inventory to a visible character (regression: GIVE_ITEM had no branch at all before this)', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      personalityTraits: [],
+      currentLocation: 'town-square',
+      inventory: [{ itemId: 'item-cloth', name: 'Cloth', quantity: 2 }],
+      visibleCharacters: [{ characterId: 'char-2', name: 'Bob' }],
+    });
+    expect(decision.selected_action).toBe('GIVE_ITEM');
+    expect(decision.target_id).toBe('char-2');
+    expect(decision.parameters?.itemId).toBe('item-cloth');
+    expect(decision.parameters?.quantity).toBe(1);
   });
 
   it('generates dialogue', async () => {

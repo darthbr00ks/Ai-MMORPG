@@ -65,6 +65,24 @@ export interface AvailableMarketItem {
   basePriceCents: number;
 }
 
+/** An item this character actually owns right now — the ONLY items
+ * SELL_ITEM's target_id or GIVE_ITEM's parameters.itemId can reference
+ * without a wasted ACTION_REJECTED (action-validator.ts's SELL_ITEM/
+ * GIVE_ITEM cases only check the item id exists in the world's global
+ * catalog, not that this character holds it — the real inventory check
+ * happens at execution time in game-engine/inventory.ts's
+ * removeFromInventory/transferItem, which fail closed). Same class of
+ * gap as AgentDecisionContext.connectedLocationSlugs: nothing told the
+ * model what it owns, so any SELL_ITEM/GIVE_ITEM proposal could only
+ * ever be a blind guess — safe (fails closed, never corrupts a
+ * balance), but wastes the turn under MockProvider and wastes a real
+ * AI call under AnthropicProvider every time the guess is wrong. */
+export interface InventoryItemSummary {
+  itemId: string;
+  name: string;
+  quantity: number;
+}
+
 export interface AgentDecisionContext {
   characterId: string;
   name: string;
@@ -94,6 +112,10 @@ export interface AgentDecisionContext {
   availableActions: string[];
   visibleCharacters: VisibleCharacter[];
   availableMarketItems: AvailableMarketItem[];
+  // What SELL_ITEM/GIVE_ITEM can actually reference — see
+  // InventoryItemSummary's doc comment. Only items with quantity > 0;
+  // an emptied-out item is dropped rather than sent as a zero row.
+  inventory: InventoryItemSummary[];
   activeConversations: ActiveConversationSummary[];
   gameCycleId: string;
   gameDay: number;
