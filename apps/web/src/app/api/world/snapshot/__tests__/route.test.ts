@@ -28,6 +28,7 @@ describe.skipIf(!DB_URL)('GET /api/world/snapshot — unknown-layout location fi
   let orphanLocationId: string;
   let knownCharacterId: string;
   let orphanCharacterId: string;
+  let noWalletCharacterId: string;
 
   beforeAll(async () => {
     client = postgres(DB_URL!);
@@ -69,6 +70,7 @@ describe.skipIf(!DB_URL)('GET /api/world/snapshot — unknown-layout location fi
       .returning({ id: schema.characters.id });
     knownCharacterId = knownCharacter.id;
     await db.insert(schema.characterState).values({ characterId: knownCharacterId, locationId: knownLocationId });
+    await db.insert(schema.wallets).values({ characterId: knownCharacterId, balanceCents: 12_345 });
 
     const [orphanCharacter] = await db
       .insert(schema.characters)
@@ -84,13 +86,34 @@ describe.skipIf(!DB_URL)('GET /api/world/snapshot — unknown-layout location fi
       .returning({ id: schema.characters.id });
     orphanCharacterId = orphanCharacter.id;
     await db.insert(schema.characterState).values({ characterId: orphanCharacterId, locationId: orphanLocationId });
+
+    // Standing at a KNOWN location (survives the filter) but deliberately
+    // given no wallet row — the LEFT JOIN fallback path a real character
+    // could hit between being created and their wallet row landing.
+    const [noWalletCharacter] = await db
+      .insert(schema.characters)
+      .values({
+        name: 'World Map Test — No Wallet Resident',
+        age: 30,
+        background: 'Stands at a known location but has no wallet row.',
+        personalityTraits: [],
+        skills: [],
+        ambitions: [],
+        archetype: 'peacekeeper',
+      })
+      .returning({ id: schema.characters.id });
+    noWalletCharacterId = noWalletCharacter.id;
+    await db.insert(schema.characterState).values({ characterId: noWalletCharacterId, locationId: knownLocationId });
   });
 
   afterAll(async () => {
+    await db.delete(schema.wallets).where(eq(schema.wallets.characterId, knownCharacterId));
     await db.delete(schema.characterState).where(eq(schema.characterState.characterId, knownCharacterId));
     await db.delete(schema.characterState).where(eq(schema.characterState.characterId, orphanCharacterId));
+    await db.delete(schema.characterState).where(eq(schema.characterState.characterId, noWalletCharacterId));
     await db.delete(schema.characters).where(eq(schema.characters.id, knownCharacterId));
     await db.delete(schema.characters).where(eq(schema.characters.id, orphanCharacterId));
+    await db.delete(schema.characters).where(eq(schema.characters.id, noWalletCharacterId));
     await db.delete(schema.locations).where(eq(schema.locations.id, orphanLocationId));
     await client.end();
   });
@@ -115,5 +138,25 @@ describe.skipIf(!DB_URL)('GET /api/world/snapshot — unknown-layout location fi
     expect(knownCharacter.locationId).toBe(knownLocationId);
     expect(knownCharacter.status).toBe('idle');
     expect(body.locations.some((loc: { id: string }) => loc.id === knownLocationId)).toBe(true);
+  });
+
+  it("exposes the character's real wallet balance for WorldMap's wealth badge", async () => {
+    const { GET } = await import('../route.js');
+    const res = await GET();
+    const body = await res.json();
+
+    const knownCharacter = body.characters.find((c: { id: string }) => c.id === knownCharacterId);
+    expect(knownCharacter.walletCents).toBe(12_345);
+  });
+
+  it('defaults walletCents to 0 for a character with no wallet row, rather than null or crashing', async () => {
+    const { GET } = await import('../route.js');
+    const res = await GET();
+    expect(res.status).toBe(200); // the LEFT JOIN must not throw on a missing wallet row
+    const body = await res.json();
+
+    const noWalletCharacter = body.characters.find((c: { id: string }) => c.id === noWalletCharacterId);
+    expect(noWalletCharacter).toBeDefined();
+    expect(noWalletCharacter.walletCents).toBe(0);
   });
 });

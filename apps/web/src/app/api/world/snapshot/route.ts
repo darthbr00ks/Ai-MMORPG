@@ -23,6 +23,11 @@ export interface WorldSnapshotCharacter {
   factionColor: string | null;
   factionName: string | null;
   factionRank: 'leader' | 'commander' | 'captain' | 'lieutenant' | 'member' | null;
+  // Cents, not a display string — WorldMap decides its own wealth-tell
+  // threshold/formatting. 0 for a character whose wallet row hasn't
+  // loaded (shouldn't happen — every seeded/created character gets
+  // one — but never crash the snapshot over a display accent).
+  walletCents: number;
 }
 
 export interface WorldSnapshot {
@@ -65,6 +70,7 @@ type CharacterRow = {
   factionRank: WorldSnapshotCharacter['factionRank'];
   factionColor: string | null;
   factionName: string | null;
+  walletCents: number | null;
 };
 
 async function loadWorldSnapshot(): Promise<WorldSnapshot> {
@@ -95,10 +101,12 @@ async function loadWorldSnapshot(): Promise<WorldSnapshot> {
       factionRank: schema.characterState.factionRank,
       factionColor: schema.factions.color,
       factionName: schema.factions.name,
+      walletCents: schema.wallets.balanceCents,
     })
     .from(schema.characters)
     .innerJoin(schema.characterState, eq(schema.characters.id, schema.characterState.characterId))
-    .leftJoin(schema.factions, eq(schema.characterState.factionId, schema.factions.id));
+    .leftJoin(schema.factions, eq(schema.characterState.factionId, schema.factions.id))
+    .leftJoin(schema.wallets, eq(schema.characters.id, schema.wallets.characterId));
 
   const [locationRows, characterRows] = await Promise.all([locationRowsPromise, characterRowsPromise]);
 
@@ -124,6 +132,7 @@ async function loadWorldSnapshot(): Promise<WorldSnapshot> {
         factionColor: c.factionColor ?? null,
         factionName: c.factionName ?? null,
         factionRank: c.factionRank ?? null,
+        walletCents: c.walletCents ?? 0,
       })),
   };
 }
