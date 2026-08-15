@@ -50,6 +50,13 @@
       "when": 1786675657224,
       "tag": "0006_yellow_praxagora",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786767768590,
+      "tag": "0007_real_starbolt",
+      "breakpoints": true
     }
   ]
 }

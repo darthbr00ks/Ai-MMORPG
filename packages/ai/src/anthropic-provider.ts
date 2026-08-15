@@ -285,7 +285,8 @@ RULES:
 - The player's directive shapes WHAT you pursue; your personality shapes HOW
 - You cannot invent new actions
 - A MOVE's target_id must be one of the exact slugs in this message's move_destinations_available — anything else is rejected and wastes the turn
-- SELL_ITEM's target_id and GIVE_ITEM's parameters.itemId must be one of the exact item ids in this message's inventory, and their quantity must not exceed what's held there — anything else is rejected and wastes the turn`;
+- SELL_ITEM's target_id and GIVE_ITEM's parameters.itemId must be one of the exact item ids in this message's inventory, and their quantity must not exceed what's held there — anything else is rejected and wastes the turn
+- Each available_market_items entry's currentPriceCents (not basePriceCents) is what BUY_ITEM/SELL_ITEM actually charge right now — it moves with recent world-wide trading pressure, so basePriceCents alone can be a stale reference point`;
   }
 
   private buildDecisionUserMessage(ctx: AgentDecisionContext): string {

@@ -10,7 +10,15 @@ import type {
   MemoryResult,
   ModerationResult,
   AiCallUsage,
+  AvailableMarketItem,
 } from '@ai-world/shared';
+
+// At/above this, BUY_ITEM should reach for food specifically rather
+// than whatever's first in the catalog — well below tick-processor.ts's
+// STARVATION_HUNGER_THRESHOLD (80), matching the doc's "increasingly
+// motivated to acquire food" framing: act before it becomes a crisis,
+// not once health is already draining.
+const HUNGRY_THRESHOLD = 50;
 
 const ZERO_USAGE: AiCallUsage = {
   inputTokens: 0,
@@ -39,6 +47,23 @@ function pickMoveDestination(
     return 'town-square';
   }
   return connectedLocationSlugs.find((slug) => slug !== currentLocationSlug) ?? null;
+}
+
+/**
+ * Which market item BUY_ITEM should target — food specifically when
+ * hunger is a real concern (falling back to the catalog's first entry
+ * if nothing food-category is on offer), the catalog's first entry
+ * otherwise. Recomputed wherever it's needed (decision-branch intent
+ * text, then again in the BUY_ITEM result block) rather than threaded
+ * through as extra state — same style as pickMoveDestination/MOVE
+ * above.
+ */
+function pickBuyItem(hunger: number, availableMarketItems: AvailableMarketItem[]): AvailableMarketItem {
+  if (hunger >= HUNGRY_THRESHOLD) {
+    const food = availableMarketItems.find((i) => i.category === 'food');
+    if (food) return food;
+  }
+  return availableMarketItems[0];
 }
 
 /**
@@ -133,8 +158,9 @@ export class MockProvider implements AgentModelProvider {
       // without a separate modulo-cadence gate like the social loop
       // above.
       action = 'BUY_ITEM';
-      goal = 'stock up on supplies';
-      intent = `Buying ${ctx.availableMarketItems[0].name.toLowerCase()} at the market`;
+      const buyTarget = pickBuyItem(ctx.hunger, ctx.availableMarketItems);
+      goal = ctx.hunger >= HUNGRY_THRESHOLD ? 'find food before hunger becomes a real problem' : 'stock up on supplies';
+      intent = `Buying ${buyTarget.name.toLowerCase()} at the market`;
     } else if (ctx.inventory.some((i) => i.quantity > 0) && ctx.visibleCharacters.length > 0) {
       // Holding stock somewhere other than the market, with someone to
       // give it to — GIVE_ITEM never had a branch at all before this,
@@ -171,14 +197,14 @@ export class MockProvider implements AgentModelProvider {
     }
 
     if (action === 'BUY_ITEM') {
-      const item = ctx.availableMarketItems[0];
+      const item = pickBuyItem(ctx.hunger, ctx.availableMarketItems);
       return {
         goal,
         selected_action: 'BUY_ITEM',
         target_id: item.itemId,
         parameters: { quantity: 1 },
         intent,
-        priority: 0.4,
+        priority: ctx.hunger >= HUNGRY_THRESHOLD ? 0.7 : 0.4,
       };
     }
 

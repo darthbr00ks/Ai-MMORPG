@@ -62,7 +62,21 @@ export interface ActiveConversationSummary {
 export interface AvailableMarketItem {
   itemId: string;
   name: string;
+  // items.category (e.g. "food") — lets the model (and MockProvider)
+  // tell a food item apart from a luxury one without matching on
+  // display name, which is cosmetic and not guaranteed stable.
+  category: string;
+  // The item's stable admin-set reference price — never what
+  // BUY_ITEM/SELL_ITEM actually charges (see currentPriceCents).
+  // Exposed mainly so the model can reason about whether today's
+  // currentPriceCents is high or low relative to normal.
   basePriceCents: number;
+  // What BUY_ITEM/SELL_ITEM actually charge on THIS tick — basePriceCents
+  // adjusted for recent world-wide trading pressure (economy-phase-1's
+  // game-engine/market-pricing.ts). Always use this one to decide
+  // whether a trade is worth it; basePriceCents alone can be stale by
+  // up to MAX_PRICE_MULTIPLIER in either direction.
+  currentPriceCents: number;
 }
 
 /** An item this character actually owns right now — the ONLY items
@@ -105,6 +119,12 @@ export interface AgentDecisionContext {
   connectedLocationSlugs: string[];
   health: number;
   fatigue: number;
+  // 0 = well-fed, 100 = starving (character_state.hunger — see
+  // apps/simulation-worker/src/metabolism.ts for how it rises and
+  // falls). Economy-phase-1's answer to §5 of the living-economy
+  // proposal: gives the model a reason to prioritize WORK/BUY_ITEM
+  // beyond an open-ended wealth directive.
+  hunger: number;
   status: CharacterStatus;
   walletCents: number;
   currentGoals: string[];
@@ -191,6 +211,22 @@ export interface AiCallUsage {
   estimatedCostCents: number;
 }
 
+// Queryable categorization for transactions.type (see schema.ts's
+// transactions table doc comment) — the known values game-engine/
+// wallet.ts's creditWallet/debitWallet/transferMoney callers actually
+// pass. Plain string union, not exhaustively enforced at the DB layer
+// (the column is nullable text, and pre-economy-phase-1 rows have
+// none) — this is the application-level source of truth for what a
+// caller SHOULD pass, matching how GameEventType below works.
+export const TransactionTypes = [
+  'purchase', // BUY_ITEM: character pays the NPC market
+  'sale', // SELL_ITEM: NPC market pays the character
+  'wage', // WORK: money entering the economy as earned income
+  'gift', // TRANSFER_MONEY: character-to-character, no goods/labor exchanged
+] as const;
+
+export type TransactionType = (typeof TransactionTypes)[number];
+
 export const GameEventTypes = [
   'CHARACTER_MOVED',
   'JOB_COMPLETED',
@@ -208,6 +244,8 @@ export const GameEventTypes = [
   'ITEM_SOLD',
   'ITEM_GIVEN',
   'MONEY_TRANSFERRED',
+  'CHARACTER_ATE',
+  'CHARACTER_STARVING',
   'SIMULATION_TICK_STARTED',
   'SIMULATION_TICK_COMPLETED',
 ] as const;

@@ -32,6 +32,10 @@ export function describeGameEvent(event: { type: string; payload: unknown }): st
       return `Gave ${payload.quantity ?? ''} ${payload.item_name ?? 'an item'} to someone.`;
     case 'MONEY_TRANSFERRED':
       return `Gave ${payload.amount_cents ?? 0} cents to someone.`;
+    case 'CHARACTER_ATE':
+      return `Ate ${payload.quantity_consumed ?? ''} ${payload.item_name ?? 'food'} from stores.`;
+    case 'CHARACTER_STARVING':
+      return `Went hungry with nothing left to eat — health suffering for it.`;
     default:
       return event.type.replace(/_/g, ' ').toLowerCase();
   }

@@ -154,6 +154,10 @@ export const characterState = pgTable('character_state', {
     .references(() => locations.id),
   health: integer('health').notNull().default(100),
   fatigue: integer('fatigue').notNull().default(0),
+  // 0 = well-fed, 100 = starving. Rises via the daily metabolism pass
+  // (apps/simulation-worker/src/metabolism.ts), falls when held food
+  // inventory is auto-consumed — see that module for the full model.
+  hunger: integer('hunger').notNull().default(0),
   status: characterStatusEnum('status').notNull().default('idle'),
   travelEta: timestamp('travel_eta'),
   travelDestinationId: uuid('travel_destination_id').references(
@@ -178,6 +182,15 @@ export const transactions = pgTable('transactions', {
   toCharacterId: uuid('to_character_id').references(() => characters.id),
   amountCents: integer('amount_cents').notNull(),
   reason: text('reason').notNull(),
+  // Free-text `reason` already existed for a human-readable audit trail;
+  // `type` is the queryable categorization on top of it (e.g. "total
+  // ever paid in wages" without parsing reason strings). Nullable, not
+  // backfilled — plain text rather than a pg enum, matching how this
+  // schema already treats open-ended taxonomies (items.category,
+  // game_events.type) versus the one genuinely closed set
+  // (character_status_enum). See TransactionType in @ai-world/shared
+  // for the known values game-engine/wallet.ts actually writes.
+  type: text('type'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
