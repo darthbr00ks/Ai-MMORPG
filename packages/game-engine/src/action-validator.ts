@@ -10,6 +10,8 @@ export interface CharacterContext {
   walletCents: number;
   health: number;
   fatigue: number;
+  /** Faction the character currently belongs to, if any. */
+  factionId?: string | null;
 }
 
 export interface WorldState {
@@ -206,6 +208,42 @@ export function validateAction(
       }
       if (!isPositiveInteger(action.parameters?.amountCents)) {
         return { valid: false, reason: 'TRANSFER_MONEY requires parameters.amountCents as a positive integer' };
+      }
+      return { valid: true };
+    }
+
+    case 'FORM_ALLIANCE': {
+      if (character.status === 'traveling') {
+        return { valid: false, reason: 'Cannot form an alliance while traveling' };
+      }
+      if (!action.target_id) {
+        return { valid: false, reason: 'FORM_ALLIANCE requires a target_id (the other character\'s id)' };
+      }
+      if (action.target_id === character.id) {
+        return { valid: false, reason: 'Cannot form an alliance with yourself' };
+      }
+      const visibleIdsAlliance = world.charactersAtSameLocation ?? [];
+      if (!visibleIdsAlliance.includes(action.target_id)) {
+        return {
+          valid: false,
+          reason: `Character '${action.target_id}' is not visible at your current location`,
+        };
+      }
+      return { valid: true };
+    }
+
+    case 'CHALLENGE_LEADERSHIP': {
+      if (character.status === 'traveling') {
+        return { valid: false, reason: 'Cannot challenge leadership while traveling' };
+      }
+      if (!character.factionId) {
+        return { valid: false, reason: 'Must be a faction member to challenge leadership' };
+      }
+      if (!action.target_id) {
+        return { valid: false, reason: 'CHALLENGE_LEADERSHIP requires a target_id (the leader\'s character id)' };
+      }
+      if (action.target_id === character.id) {
+        return { valid: false, reason: 'Cannot challenge yourself' };
       }
       return { valid: true };
     }

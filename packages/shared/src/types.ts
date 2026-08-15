@@ -248,6 +248,11 @@ export const GameEventTypes = [
   'CHARACTER_STARVING',
   'SIMULATION_TICK_STARTED',
   'SIMULATION_TICK_COMPLETED',
+  'FACTION_FOUNDED',
+  'FACTION_MEMBER_JOINED',
+  'LEADERSHIP_CHALLENGED',
+  'ROMANCE_EXPRESSED',
+  'CHALLENGE_ISSUED',
 ] as const;
 
 export type GameEventType = (typeof GameEventTypes)[number];

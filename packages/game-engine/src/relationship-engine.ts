@@ -73,6 +73,10 @@ const RELATIONSHIP_EFFECTS = {
   // conversation, same "deltas only, deterministic" rule.
   ITEM_GIVEN: { trust: 2, affection: 2 },
   MONEY_GIVEN: { trust: 3, affection: 1 },
+  // Forming an alliance is a major trust signal.
+  ALLIANCE_FORMED: { trust: 8, respect: 5, familiarity: 4 },
+  // A leadership challenge strains the relationship regardless of outcome.
+  LEADERSHIP_CHALLENGED: { hostility: 6, fear: 3, respect: -2 },
 } as const satisfies Record<string, Partial<RelationshipDimensions>>;
 
 export type RelationshipEffectType = keyof typeof RELATIONSHIP_EFFECTS;
