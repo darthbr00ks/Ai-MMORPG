@@ -274,12 +274,20 @@ const CHARACTERS = [
   },
 ];
 
-// §6 of the build plan: currency, food, iron, wood. Fixed NPC-market
-// prices for Phase 12's simple economy — see items.basePriceCents.
+// §6 of the build plan's currency/food/iron/wood, extended to the
+// economy-phase-1 pass's six resource categories (food/wood/stone/
+// iron/medicine/luxury) — see docs/architecture.md's Economy Phase 1
+// section for why this reuses the existing generic `items` catalog
+// rather than introducing a parallel ResourceType concept. Prices are
+// the *base* an item's dynamic price (market-pricing.ts) floats around,
+// not what BUY_ITEM/SELL_ITEM actually charge on any given tick.
 const ITEMS = [
   { name: 'Food', category: 'food', basePriceCents: 20 },
-  { name: 'Iron', category: 'resource', basePriceCents: 80 },
-  { name: 'Wood', category: 'resource', basePriceCents: 15 },
+  { name: 'Wood', category: 'wood', basePriceCents: 15 },
+  { name: 'Stone', category: 'stone', basePriceCents: 35 },
+  { name: 'Iron', category: 'iron', basePriceCents: 80 },
+  { name: 'Medicine', category: 'medicine', basePriceCents: 150 },
+  { name: 'Luxury Goods', category: 'luxury', basePriceCents: 300 },
 ];
 
 async function seed() {
@@ -374,7 +382,17 @@ async function seed() {
       .limit(1);
 
     if (existing.length > 0) {
-      console.log(`  Item exists: ${item.name}`);
+      // Unlike locations/characters above, items are cheap to keep in
+      // sync on re-seed: re-running this against a database seeded
+      // before the six-category expansion (this economy-phase-1 pass
+      // recategorized Iron/Wood from a single "resource" bucket) should
+      // actually fix those rows' category/price, not silently leave
+      // them stale forever.
+      await db
+        .update(schema.items)
+        .set({ category: item.category, basePriceCents: item.basePriceCents })
+        .where(eq(schema.items.id, existing[0].id));
+      console.log(`  Item exists, synced: ${item.name}`);
     } else {
       const [inserted] = await db
         .insert(schema.items)

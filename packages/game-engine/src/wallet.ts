@@ -1,6 +1,7 @@
 import { type Db } from '@ai-world/database';
 import { wallets, transactions } from '@ai-world/database';
 import { eq } from 'drizzle-orm';
+import type { TransactionType } from '@ai-world/shared';
 
 export interface TransferResult {
   success: boolean;
@@ -19,7 +20,8 @@ export async function transferMoney(
   fromCharacterId: string,
   toCharacterId: string,
   amountCents: number,
-  reason: string
+  reason: string,
+  type: TransactionType = 'gift'
 ): Promise<TransferResult> {
   if (amountCents <= 0) {
     return { success: false, reason: 'Amount must be positive' };
@@ -93,6 +95,7 @@ export async function transferMoney(
       toCharacterId,
       amountCents,
       reason,
+      type,
       createdAt: new Date(),
     });
 
@@ -113,7 +116,8 @@ export async function creditWallet(
   db: Db,
   characterId: string,
   amountCents: number,
-  reason: string
+  reason: string,
+  type: TransactionType = 'wage'
 ): Promise<TransferResult> {
   if (amountCents <= 0) {
     return { success: false, reason: 'Amount must be positive' };
@@ -145,6 +149,7 @@ export async function creditWallet(
       toCharacterId: characterId,
       amountCents,
       reason,
+      type,
       createdAt: new Date(),
     });
 
@@ -164,7 +169,8 @@ export async function debitWallet(
   db: Db,
   characterId: string,
   amountCents: number,
-  reason: string
+  reason: string,
+  type: TransactionType = 'purchase'
 ): Promise<TransferResult> {
   if (amountCents <= 0) {
     return { success: false, reason: 'Amount must be positive' };
@@ -202,6 +208,7 @@ export async function debitWallet(
       toCharacterId: null,
       amountCents,
       reason,
+      type,
       createdAt: new Date(),
     });
 

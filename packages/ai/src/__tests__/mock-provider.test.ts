@@ -14,6 +14,7 @@ const baseCtx: AgentDecisionContext = {
   connectedLocationSlugs: ['tavern', 'market', 'city-hall', 'residential-district'],
   health: 100,
   fatigue: 0,
+  hunger: 0,
   status: 'idle',
   walletCents: 10000,
   currentGoals: ['survive'],
@@ -159,10 +160,45 @@ describe('MockProvider', () => {
       personalityTraits: [],
       currentLocation: 'market',
       inventory: [],
-      availableMarketItems: [{ itemId: 'item-grain', name: 'Grain', basePriceCents: 50 }],
+      availableMarketItems: [
+        { itemId: 'item-grain', name: 'Grain', category: 'luxury', basePriceCents: 50, currentPriceCents: 50 },
+      ],
     });
     expect(decision.selected_action).toBe('BUY_ITEM');
     expect(decision.target_id).toBe('item-grain');
+  });
+
+  it('reaches for food specifically when hungry, over a non-food item earlier in the catalog', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      personalityTraits: [],
+      currentLocation: 'market',
+      hunger: 75,
+      inventory: [],
+      availableMarketItems: [
+        { itemId: 'item-luxury', name: 'Luxury Goods', category: 'luxury', basePriceCents: 300, currentPriceCents: 300 },
+        { itemId: 'item-food', name: 'Food', category: 'food', basePriceCents: 20, currentPriceCents: 20 },
+      ],
+    });
+    expect(decision.selected_action).toBe('BUY_ITEM');
+    expect(decision.target_id).toBe('item-food');
+  });
+
+  it('falls back to the catalog default when hungry but nothing food-category is on offer', async () => {
+    const provider = new MockProvider();
+    const decision = await provider.decideAction({
+      ...baseCtx,
+      personalityTraits: [],
+      currentLocation: 'market',
+      hunger: 75,
+      inventory: [],
+      availableMarketItems: [
+        { itemId: 'item-luxury', name: 'Luxury Goods', category: 'luxury', basePriceCents: 300, currentPriceCents: 300 },
+      ],
+    });
+    expect(decision.selected_action).toBe('BUY_ITEM');
+    expect(decision.target_id).toBe('item-luxury');
   });
 
   it('gives an item actually held in inventory to a visible character (regression: GIVE_ITEM had no branch at all before this)', async () => {

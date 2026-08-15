@@ -934,6 +934,166 @@ describe.skipIf(!DB_URL)('processTick — economy actions', () => {
 });
 
 /**
+ * Economy-phase-1: proves the dynamic-pricing wiring actually reaches
+ * BUY_ITEM's real charge, not just that game-engine/market-pricing.ts's
+ * calculateMarketPrice is correct in isolation (already covered by its
+ * own unit tests). Seeds real recent-purchase pressure via ITEM_PURCHASED
+ * game_events (the same signal tick-processor.ts reads), then confirms
+ * a BUY_ITEM in the very next tick is actually charged above the item's
+ * static basePriceCents — not just quoted a higher currentPriceCents
+ * that then goes unused at execution time.
+ */
+describe.skipIf(!DB_URL)('processTick — dynamic market pricing reaches BUY_ITEM\'s real charge', () => {
+  let client: ReturnType<typeof postgres>;
+  let db: ReturnType<typeof drizzle<typeof schema>>;
+  let marketLocationId: string;
+  let itemId: string;
+  let buyerId: string;
+  let pressureActorId: string;
+
+  const BASE_PRICE_CENTS = 100;
+  // Comfortably clears MIN_PRICE_MULTIPLIER..MAX_PRICE_MULTIPLIER's
+  // saturation point (market-pricing.ts) so this test isn't sensitive
+  // to the exact pressure-sensitivity constant, only its direction.
+  const SIMULATED_RECENT_PURCHASES = 30;
+
+  beforeAll(async () => {
+    client = postgres(DB_URL!);
+    db = drizzle(client, { schema });
+
+    const [marketLocation] = await db
+      .select()
+      .from(schema.locations)
+      .where(eq(schema.locations.slug, 'market'))
+      .limit(1);
+    if (!marketLocation) {
+      throw new Error(
+        'processTick — dynamic market pricing requires a seeded "market" location. Run `pnpm db:seed` against DATABASE_URL before running this test.'
+      );
+    }
+    marketLocationId = marketLocation.id;
+
+    const [item] = await db
+      .insert(schema.items)
+      .values({ name: 'Pricing Test Widget', category: 'test', basePriceCents: BASE_PRICE_CENTS })
+      .returning({ id: schema.items.id });
+    itemId = item.id;
+
+    const [pressureActor] = await db
+      .insert(schema.characters)
+      .values({
+        name: 'Pricing Test Pressure Actor',
+        age: 30,
+        background: 'Exists only so ITEM_PURCHASED events can be attributed to someone.',
+        personalityTraits: [],
+        skills: [],
+        ambitions: [],
+        archetype: 'wealth-seeker',
+      })
+      .returning({ id: schema.characters.id });
+    pressureActorId = pressureActor.id;
+
+    // Real recent purchase pressure — the exact signal tick-processor.ts
+    // reads (ITEM_PURCHASED events within the last gameDayRealSeconds).
+    await db.insert(schema.gameEvents).values(
+      Array.from({ length: SIMULATED_RECENT_PURCHASES }, () => ({
+        type: 'ITEM_PURCHASED' as const,
+        actorCharacterId: pressureActorId,
+        payload: { item_id: itemId, item_name: 'Pricing Test Widget', quantity: 1, total_cost_cents: BASE_PRICE_CENTS },
+        importance: 0.2,
+        createdAt: new Date(),
+      }))
+    );
+
+    const [buyer] = await db
+      .insert(schema.characters)
+      .values({
+        name: 'Pricing Test Buyer',
+        age: 30,
+        background: 'A character created to test dynamic pricing reaching BUY_ITEM.',
+        personalityTraits: [],
+        skills: [],
+        ambitions: [],
+        archetype: 'wealth-seeker',
+      })
+      .returning({ id: schema.characters.id });
+    buyerId = buyer.id;
+    await db.insert(schema.characterState).values({
+      characterId: buyerId,
+      locationId: marketLocationId,
+      health: 100,
+      fatigue: 0,
+      status: 'idle',
+    });
+    // Comfortably covers even MAX_PRICE_MULTIPLIER's ceiling.
+    await db.insert(schema.wallets).values({ characterId: buyerId, balanceCents: 100_000 });
+  });
+
+  afterAll(async () => {
+    const allIds = [buyerId, pressureActorId];
+    const ownDecisions = await db
+      .select({ id: schema.agentDecisions.id })
+      .from(schema.agentDecisions)
+      .where(inArray(schema.agentDecisions.characterId, allIds));
+    const decisionIds = ownDecisions.map((d) => d.id);
+
+    // Deleting by actor id covers every row this test itself created —
+    // both the seeded ITEM_PURCHASED pressure events and whatever the
+    // tick wrote for the buyer.
+    await db.delete(schema.gameEvents).where(inArray(schema.gameEvents.actorCharacterId, allIds));
+    await db.delete(schema.aiUsage).where(inArray(schema.aiUsage.characterId, allIds));
+    if (decisionIds.length > 0) {
+      await db.delete(schema.agentActions).where(inArray(schema.agentActions.decisionId, decisionIds));
+    }
+    await db.delete(schema.agentDecisions).where(inArray(schema.agentDecisions.characterId, allIds));
+    await db.delete(schema.transactions).where(
+      or(inArray(schema.transactions.fromCharacterId, allIds), inArray(schema.transactions.toCharacterId, allIds))
+    );
+    await db.delete(schema.inventory).where(inArray(schema.inventory.characterId, allIds));
+    await db.delete(schema.wallets).where(inArray(schema.wallets.characterId, allIds));
+    await db.delete(schema.characterState).where(inArray(schema.characterState.characterId, allIds));
+    await db.delete(schema.characters).where(inArray(schema.characters.id, allIds));
+    await db.delete(schema.items).where(eq(schema.items.id, itemId));
+    await client.end();
+  });
+
+  it('charges above basePriceCents once recent purchase pressure has built up', async () => {
+    const script = new Map<string, AgentDecision>([
+      [
+        buyerId,
+        {
+          goal: 'stock up despite the price',
+          selected_action: 'BUY_ITEM',
+          target_id: itemId,
+          parameters: { quantity: 1 },
+          intent: 'buying under pressure',
+          priority: 0.5,
+        },
+      ],
+    ]);
+
+    const result = await processTick(
+      db,
+      new ScriptedProvider(script),
+      {
+        gameDayRealSeconds: 300,
+        simulationTickSeconds: 10,
+        dailyBudgetCents: 500,
+        providerName: 'mock',
+        modelName: 'mock',
+      },
+      new Date()
+    );
+
+    expect(result.errors.some((e) => e.includes(buyerId))).toBe(false);
+
+    const [buyerWallet] = await db.select().from(schema.wallets).where(eq(schema.wallets.characterId, buyerId));
+    const actualChargeCents = 100_000 - buyerWallet.balanceCents;
+    expect(actualChargeCents).toBeGreaterThan(BASE_PRICE_CENTS);
+  });
+});
+
+/**
  * Regression test for a real bug found by code review: the per-tick
  * `conversationInfoById` snapshot used to stay unchanged for the rest
  * of the tick even after a conversation was ended mid-tick by the
