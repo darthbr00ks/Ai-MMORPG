@@ -115,14 +115,34 @@ export class MockProvider implements AgentModelProvider {
       action = 'WORK';
       goal = 'earn more money';
       intent = 'Working to secure financial stability';
+    } else if (ctx.currentLocation === 'market' && ctx.inventory.some((i) => i.quantity > 0)) {
+      // Comfortably wealthy and standing at the one place SELL_ITEM is
+      // legal, already holding stock — cash it in before considering a
+      // fresh purchase below. Only ever fires against ctx.inventory
+      // (never a guessed id), the same real-holdings grounding
+      // AgentDecisionContext.inventory exists to provide — see its
+      // doc comment and the regression test this mirrors from the
+      // connectedLocationSlugs/MOVE fix.
+      action = 'SELL_ITEM';
+      goal = 'convert surplus goods into coin';
+      intent = `Selling ${ctx.inventory.find((i) => i.quantity > 0)!.name.toLowerCase()} at the market`;
     } else if (ctx.currentLocation === 'market' && ctx.availableMarketItems.length > 0) {
       // Comfortably wealthy (the wallet < 5000 branch above didn't
-      // fire) and standing at the one place BUY_ITEM is legal —
-      // exercises the Phase 12 economy actions in dev/tests without a
-      // separate modulo-cadence gate like the social loop above.
+      // fire), nothing to sell, and standing at the one place BUY_ITEM
+      // is legal — exercises the Phase 12 economy actions in dev/tests
+      // without a separate modulo-cadence gate like the social loop
+      // above.
       action = 'BUY_ITEM';
       goal = 'stock up on supplies';
       intent = `Buying ${ctx.availableMarketItems[0].name.toLowerCase()} at the market`;
+    } else if (ctx.inventory.some((i) => i.quantity > 0) && ctx.visibleCharacters.length > 0) {
+      // Holding stock somewhere other than the market, with someone to
+      // give it to — GIVE_ITEM never had a branch at all before this,
+      // so it was permanently dead code under MockProvider regardless
+      // of what the model could see.
+      action = 'GIVE_ITEM';
+      goal = 'strengthen a bond through generosity';
+      intent = `Giving ${ctx.inventory.find((i) => i.quantity > 0)!.name.toLowerCase()} to ${ctx.visibleCharacters[0].name}`;
     }
 
     if (action === 'MOVE') {
@@ -159,6 +179,36 @@ export class MockProvider implements AgentModelProvider {
         parameters: { quantity: 1 },
         intent,
         priority: 0.4,
+      };
+    }
+
+    if (action === 'SELL_ITEM') {
+      // Sell one unit, never more than held — action-validator.ts only
+      // checks the item id exists in the world's global catalog, not
+      // that this character has enough of it, so a quantity from
+      // anywhere but ctx.inventory's own reported amount would be a
+      // guess (see InventoryItemSummary's doc comment).
+      const holding = ctx.inventory.find((i) => i.quantity > 0)!;
+      return {
+        goal,
+        selected_action: 'SELL_ITEM',
+        target_id: holding.itemId,
+        parameters: { quantity: 1 },
+        intent,
+        priority: 0.4,
+      };
+    }
+
+    if (action === 'GIVE_ITEM') {
+      const holding = ctx.inventory.find((i) => i.quantity > 0)!;
+      const recipient = ctx.visibleCharacters[0];
+      return {
+        goal,
+        selected_action: 'GIVE_ITEM',
+        target_id: recipient.characterId,
+        parameters: { itemId: holding.itemId, quantity: 1 },
+        intent,
+        priority: 0.45,
       };
     }
 

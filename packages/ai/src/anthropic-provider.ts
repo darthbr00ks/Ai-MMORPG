@@ -284,7 +284,8 @@ RULES:
 - You may only select from the listed actions
 - The player's directive shapes WHAT you pursue; your personality shapes HOW
 - You cannot invent new actions
-- A MOVE's target_id must be one of the exact slugs in this message's move_destinations_available — anything else is rejected and wastes the turn`;
+- A MOVE's target_id must be one of the exact slugs in this message's move_destinations_available — anything else is rejected and wastes the turn
+- SELL_ITEM's target_id and GIVE_ITEM's parameters.itemId must be one of the exact item ids in this message's inventory, and their quantity must not exceed what's held there — anything else is rejected and wastes the turn`;
   }
 
   private buildDecisionUserMessage(ctx: AgentDecisionContext): string {
@@ -305,6 +306,10 @@ RULES:
       visible_characters: ctx.visibleCharacters.slice(0, 10),
       active_conversations: ctx.activeConversations.slice(0, 5),
       available_market_items: ctx.availableMarketItems,
+      // Exhaustive — the only items SELL_ITEM/GIVE_ITEM can legally
+      // reference (see the RULES line above and
+      // AgentDecisionContext.inventory's doc comment).
+      inventory: ctx.inventory,
       game_day: ctx.gameDay,
     });
   }
