@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { schema } from '@ai-world/database';
 import { eq } from 'drizzle-orm';
-import { LOCATION_LAYOUT } from '@/lib/world-layout';
+import { WORLD_LOCATION_SLUGS } from '@/lib/world-scene-layout';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,13 +16,17 @@ export interface WorldSnapshotLocation {
 export interface WorldSnapshotCharacter {
   id: string;
   name: string;
+  age: number;
   archetype: string;
   locationId: string;
+  locationName: string;
   status: 'idle' | 'working' | 'traveling' | 'conversing' | 'sleeping' | 'planning';
   factionId: string | null;
   factionColor: string | null;
   factionName: string | null;
   factionRank: 'leader' | 'commander' | 'captain' | 'lieutenant' | 'member' | null;
+  travelDestinationId: string | null;
+  travelEta: string | null;
   // Cents, not a display string — WorldMap decides its own wealth-tell
   // threshold/formatting. 0 for a character whose wallet row hasn't
   // loaded (shouldn't happen — every seeded/created character gets
@@ -63,13 +67,17 @@ type LocationRow = {
 type CharacterRow = {
   id: string;
   name: string;
+  age: number;
   archetype: string;
   locationId: string;
+  locationName: string;
   status: WorldSnapshotCharacter['status'];
   factionId: string | null;
   factionRank: WorldSnapshotCharacter['factionRank'];
   factionColor: string | null;
   factionName: string | null;
+  travelDestinationId: string | null;
+  travelEta: Date | null;
   walletCents: number | null;
 };
 
@@ -94,23 +102,28 @@ async function loadWorldSnapshot(): Promise<WorldSnapshot> {
     .select({
       id: schema.characters.id,
       name: schema.characters.name,
+      age: schema.characters.age,
       archetype: schema.characters.archetype,
       locationId: schema.characterState.locationId,
+      locationName: schema.locations.name,
       status: schema.characterState.status,
       factionId: schema.characterState.factionId,
       factionRank: schema.characterState.factionRank,
       factionColor: schema.factions.color,
       factionName: schema.factions.name,
+      travelDestinationId: schema.characterState.travelDestinationId,
+      travelEta: schema.characterState.travelEta,
       walletCents: schema.wallets.balanceCents,
     })
     .from(schema.characters)
     .innerJoin(schema.characterState, eq(schema.characters.id, schema.characterState.characterId))
+    .innerJoin(schema.locations, eq(schema.characterState.locationId, schema.locations.id))
     .leftJoin(schema.factions, eq(schema.characterState.factionId, schema.factions.id))
     .leftJoin(schema.wallets, eq(schema.characters.id, schema.wallets.characterId));
 
   const [locationRows, characterRows] = await Promise.all([locationRowsPromise, characterRowsPromise]);
 
-  const knownLocationRows = locationRows.filter((loc) => loc.slug in LOCATION_LAYOUT);
+  const knownLocationRows = locationRows.filter((loc) => WORLD_LOCATION_SLUGS.includes(loc.slug));
   const knownLocationIds = new Set(knownLocationRows.map((loc) => loc.id));
 
   return {
@@ -125,13 +138,17 @@ async function loadWorldSnapshot(): Promise<WorldSnapshot> {
       .map((c) => ({
         id: c.id,
         name: c.name,
+        age: c.age,
         archetype: c.archetype,
         locationId: c.locationId,
+        locationName: c.locationName,
         status: c.status,
         factionId: c.factionId ?? null,
         factionColor: c.factionColor ?? null,
         factionName: c.factionName ?? null,
         factionRank: c.factionRank ?? null,
+        travelDestinationId: c.travelDestinationId ?? null,
+        travelEta: c.travelEta ? c.travelEta.toISOString() : null,
         walletCents: c.walletCents ?? 0,
       })),
   };

@@ -136,7 +136,11 @@ describe.skipIf(!DB_URL)('GET /api/world/snapshot — unknown-layout location fi
     const knownCharacter = body.characters.find((c: { id: string }) => c.id === knownCharacterId);
     expect(knownCharacter).toBeDefined();
     expect(knownCharacter.locationId).toBe(knownLocationId);
+    expect(knownCharacter.locationName).toBe('Town Square');
     expect(knownCharacter.status).toBe('idle');
+    expect(knownCharacter.age).toBe(30);
+    expect(knownCharacter.travelDestinationId).toBeNull();
+    expect(knownCharacter.travelEta).toBeNull();
     expect(body.locations.some((loc: { id: string }) => loc.id === knownLocationId)).toBe(true);
   });
 
