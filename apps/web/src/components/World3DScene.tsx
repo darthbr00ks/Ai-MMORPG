@@ -13,7 +13,6 @@ import {
   findWorldPath,
   getConversationMeetingSpots,
   getLocationCharacterSpot,
-  terrainAtWorldPoint,
   type SceneLocationLayout,
   type WorldPoint,
 } from '@/lib/world-scene-layout';
@@ -47,7 +46,6 @@ type RenderCharacter = WorldSnapshotCharacter & {
   locationSlug: string;
   targetPosition: WorldPoint;
   facingTarget?: WorldPoint;
-  isWalking: boolean;
   isTalking: boolean;
   speechText?: string;
   hovered: boolean;
@@ -370,7 +368,8 @@ function CharacterActor({
   useFrame((state, delta) => {
     const motion = desired.clone().sub(currentPosition.current);
     const distance = motion.length();
-    const moveSpeed = character.isWalking ? 6.4 : 4.2;
+    const isMoving = distance > 0.12;
+    const moveSpeed = isMoving ? 6.4 : 4.2;
     if (distance > 0.01) {
       motion.normalize();
       const step = Math.min(distance, moveSpeed * delta);
@@ -402,11 +401,11 @@ function CharacterActor({
     const t = state.clock.getElapsedTime();
     const walkCycle = Math.sin(t * 8);
     const idleCycle = Math.sin(t * 2 + hashString(character.id) * 0.01);
-    const gait = character.isWalking ? walkCycle * 0.65 : 0;
+    const gait = isMoving ? walkCycle * 0.65 : 0;
     const talkGesture = character.isTalking ? Math.sin(t * 5) * 0.4 : 0;
 
     if (headRef.current) {
-      headRef.current.position.y = 2.65 + (character.isWalking ? 0.05 : 0.08) * idleCycle;
+      headRef.current.position.y = 2.65 + (isMoving ? 0.05 : 0.08) * idleCycle;
     }
     if (leftArmRef.current) {
       leftArmRef.current.rotation.x = -gait + talkGesture;
@@ -520,13 +519,11 @@ function CharacterActor({
 
 function Scene({
   characters,
-  selectedCharacterId,
   onSelectCharacter,
   hoveredCharacterId,
   onHoverCharacter,
 }: {
   characters: RenderCharacter[];
-  selectedCharacterId: string | null;
   onSelectCharacter: (characterId: string | null) => void;
   hoveredCharacterId: string | null;
   onHoverCharacter: (characterId: string | null) => void;
@@ -577,14 +574,14 @@ function Scene({
           }}
           onPointerOut={(event) => {
             event.stopPropagation();
-            onHoverCharacter((current) => (current === character.id ? null : current) as never);
+            onHoverCharacter(null);
           }}
         >
           <CharacterActor
             character={{
               ...character,
               hovered: hoveredCharacterId === character.id,
-              selected: selectedCharacterId === character.id,
+              selected: character.selected,
             }}
             onSelect={onSelectCharacter}
           />
@@ -609,9 +606,6 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
   const [travelPlans, setTravelPlans] = useState<Record<string, TravelPlan>>({});
   const [conversations, setConversations] = useState<Record<string, ConversationStage>>({});
   const [speechBubbles, setSpeechBubbles] = useState<Record<string, SpeechBubble>>({});
-  const snapshotRef = useRef(snapshot);
-
-  snapshotRef.current = snapshot;
 
   useEffect(() => {
     setSelectedCharacterId((current) =>
@@ -702,8 +696,9 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
         event.targetCharacterId &&
         typeof event.payload.message === 'string'
       ) {
+        const actorCharacterId = event.actorCharacterId;
         const [participantAId, participantBId] = [
-          event.actorCharacterId,
+          actorCharacterId,
           event.targetCharacterId,
         ].sort();
         const stageId = `${participantAId}|${participantBId}`;
@@ -720,9 +715,9 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
         }));
         setSpeechBubbles((current) => ({
           ...current,
-          [event.actorCharacterId]: {
+          [actorCharacterId]: {
             id: event.id,
-            characterId: event.actorCharacterId,
+            characterId: actorCharacterId,
             text: event.payload.message as string,
             expiresAtMs: now + SPEECH_LIFETIME_MS,
           },
@@ -808,7 +803,6 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
       const travelPlan = travelPlans[character.id];
       let targetPosition = anchor;
       let facingTarget: WorldPoint | undefined;
-      let isWalking = false;
 
       if (travelPlan) {
         const fromSlug = locationById.get(travelPlan.fromLocationId)?.slug;
@@ -827,13 +821,11 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
             targetPosition = pathPointAtProgress(path, progress);
             const lookAhead = pathPointAtProgress(path, Math.min(1, progress + 0.02));
             facingTarget = lookAhead;
-            isWalking = progress < 0.999;
           }
         }
       } else if (activeConversation) {
         targetPosition = activeConversation.target;
         facingTarget = activeConversation.facing;
-        isWalking = true;
       }
 
       const speechText = speechBubbles[character.id]?.text;
@@ -843,7 +835,6 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
         locationSlug,
         targetPosition,
         facingTarget,
-        isWalking,
         isTalking: Boolean(speechText || activeConversation),
         speechText,
         hovered: hoveredCharacterId === character.id,
@@ -883,10 +874,9 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
         >
           <Scene
             characters={renderCharacters}
-            selectedCharacterId={selectedCharacterId}
             onSelectCharacter={setSelectedCharacterId}
             hoveredCharacterId={hoveredCharacterId}
-            onHoverCharacter={setHoveredCharacterId as (characterId: string | null) => void}
+            onHoverCharacter={setHoveredCharacterId}
           />
         </Canvas>
       </div>

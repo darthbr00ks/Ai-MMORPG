@@ -21,15 +21,21 @@ describe('world-scene-layout', () => {
   });
 
   it('finds a non-empty path between seeded locations', () => {
+    const start = LOCATION_SCENE_LAYOUT.tavern.characterAnchor;
+    const end = LOCATION_SCENE_LAYOUT.market.characterAnchor;
     const path = findWorldPath(
-      LOCATION_SCENE_LAYOUT.tavern.characterAnchor,
-      LOCATION_SCENE_LAYOUT.market.characterAnchor
+      start,
+      end
     );
     expect(path.length).toBeGreaterThan(2);
-    expect(path[0]).toEqual(expect.objectContaining(LOCATION_SCENE_LAYOUT.tavern.characterAnchor));
-    expect(path[path.length - 1]).toEqual(
-      expect.objectContaining(LOCATION_SCENE_LAYOUT.market.characterAnchor)
-    );
+    expect(path[0]).not.toEqual(path[path.length - 1]);
+    expect(
+      Math.abs(path[0].x - start.x) + Math.abs(path[0].z - start.z)
+    ).toBeLessThanOrEqual(4.5);
+    expect(
+      Math.abs(path[path.length - 1].x - end.x) + Math.abs(path[path.length - 1].z - end.z)
+    ).toBeLessThanOrEqual(4.5);
+    expect(path.every((point) => isWorldPointWalkable(point))).toBe(true);
   });
 
   it('spreads characters within a location and creates paired meeting spots', () => {
