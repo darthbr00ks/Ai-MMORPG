@@ -12,9 +12,15 @@
  * WorldMap skips rendering it (and its characters) rather than guessing
  * a position — see WorldMap's `locationLayoutIsKnown` check.
  */
-export interface WorldMapPoint {
+/** A bare x/y — used for anything that isn't itself a location on the
+ * map (e.g. a character's offset from the location they're standing
+ * at), where a tile icon type doesn't apply. */
+export interface Point {
   x: number;
   y: number;
+}
+
+export interface WorldMapPoint extends Point {
   /** Determines which SVG tile icon is rendered for this location node. */
   type: LocationNodeType;
 }
@@ -65,7 +71,7 @@ export const LOCATION_LAYOUT: Record<string, WorldMapPoint> = {
 export function characterOffsetWithinLocation(
   indexWithinLocation: number,
   countAtLocation: number
-): WorldMapPoint {
+): Point {
   if (countAtLocation <= 1) {
     // The lone occupant sits just off-center — enough that the location
     // node's own ring is still visible peeking out from behind them.
