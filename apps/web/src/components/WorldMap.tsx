@@ -199,6 +199,36 @@ function RankBadge({ rank }: { rank: NonNullable<WorldSnapshotCharacter['faction
   );
 }
 
+// ─── Wealth badge ───────────────────────────────────────────────────────────────
+
+// 3x the alpha's starting wallet (DEFAULT_STARTING_CURRENCY_CENTS,
+// 10000¢) — comfortably above what a few days of ordinary WORK/BUY_ITEM
+// activity would produce by chance, so the badge reads as "doing
+// noticeably well," not "played the game for an hour." No equivalent
+// server-side concept exists (or should — this is a spectator-only
+// visual tell, not a game mechanic with rules attached), so the
+// threshold lives here rather than in shared config.
+const WEALTHY_WALLET_THRESHOLD_CENTS = 30_000;
+
+/** Bottom-right corner badge — the wealth-tell counterpart to
+ * RankBadge's top-right faction rank. Bottom corner specifically so
+ * the two never collide on a character who is both wealthy and
+ * ranked. */
+function WealthBadge() {
+  return (
+    <text
+      x={AVATAR_SIZE / 2 - 2}
+      y={AVATAR_SIZE / 2 - 2}
+      textAnchor="middle"
+      dominantBaseline="auto"
+      fontSize={11}
+      style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
+    >
+      💰
+    </text>
+  );
+}
+
 // ─── Effect types ─────────────────────────────────────────────────────────────
 
 interface RawStreamEvent {
@@ -428,11 +458,50 @@ export default function WorldMap() {
         return;
       }
 
+      // A conversation ending had no visual at all before this — every
+      // other conversation moment (started, each message) already gets
+      // one via the speech-bubble branch above.
+      if (event.type === 'CONVERSATION_ENDED' && event.actorCharacterId) {
+        pushEffect(
+          { id: event.id, kind: 'emoji', characterId: event.actorCharacterId, emoji: '🙇', fadingOut: false },
+          EMOJI_LIFETIME_MS
+        );
+        return;
+      }
+
+      // FACTION_FOUNDED gets its own banner above; joining an EXISTING
+      // faction is quieter — no announcement-worthy banner, just a
+      // handshake on the new member (the one actually joining,
+      // targetCharacterId — the inviting leader is the actor).
+      if (event.type === 'FACTION_MEMBER_JOINED' && event.targetCharacterId) {
+        pushEffect(
+          { id: event.id, kind: 'emoji', characterId: event.targetCharacterId, emoji: '🤝', fadingOut: false },
+          EMOJI_LIFETIME_MS
+        );
+        return;
+      }
+
       const toastText = toastTextFor(event);
       if (toastText && event.actorCharacterId) {
         pushEffect(
           { id: event.id, kind: 'toast', characterId: event.actorCharacterId, text: toastText, fadingOut: false },
           TOAST_LIFETIME_MS
+        );
+      }
+
+      // The giver already gets a toast above ("gave away X" / "-N¢") —
+      // the recipient side of a gift/transfer had no reaction of their
+      // own at all before this.
+      if (event.type === 'ITEM_GIVEN' && event.targetCharacterId) {
+        pushEffect(
+          { id: `${event.id}-received`, kind: 'emoji', characterId: event.targetCharacterId, emoji: '🎁', fadingOut: false },
+          EMOJI_LIFETIME_MS
+        );
+      }
+      if (event.type === 'MONEY_TRANSFERRED' && event.targetCharacterId) {
+        pushEffect(
+          { id: `${event.id}-received`, kind: 'emoji', characterId: event.targetCharacterId, emoji: '🪙', fadingOut: false },
+          EMOJI_LIFETIME_MS
         );
       }
     };
@@ -732,6 +801,9 @@ export default function WorldMap() {
 
                 {/* Faction rank badge — top-right corner of avatar */}
                 {character.factionRank && <RankBadge rank={character.factionRank} />}
+
+                {/* Wealth badge — bottom-right corner of avatar */}
+                {character.walletCents >= WEALTHY_WALLET_THRESHOLD_CENTS && <WealthBadge />}
 
                 {/* Name label */}
                 <text
