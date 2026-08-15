@@ -1,4 +1,4 @@
-import { eq, and, isNull, inArray, desc } from 'drizzle-orm';
+import { eq, and, isNull, inArray, desc, or } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import {
   characters,
@@ -15,6 +15,8 @@ import {
   conversationMessages,
   memories,
   items,
+  factions,
+  relationships,
 } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
 import {
@@ -411,6 +413,8 @@ export async function processTick(
           'SELL_ITEM',
           'GIVE_ITEM',
           'TRANSFER_MONEY',
+          'FORM_ALLIANCE',
+          'CHALLENGE_LEADERSHIP',
         ],
         visibleCharacters,
         activeConversations,
@@ -500,6 +504,7 @@ export async function processTick(
           walletCents: wallet?.balanceCents || 0,
           health: currentState.health,
           fatigue: currentState.fatigue,
+          factionId: currentState.factionId ?? null,
         },
         worldState
       );
@@ -554,6 +559,7 @@ export async function processTick(
           state: currentState,
           locations: locationsBySlug,
           cycleId,
+          gameDay: gameTime.day,
           gameDayRealSeconds: config.gameDayRealSeconds,
           characterNameById,
           conversationInfoById,
@@ -634,6 +640,61 @@ function moveDurationMs(gameDayRealSeconds: number): number {
   return (MOVE_DURATION_GAME_HOURS / 24) * gameDayRealSeconds * 1000;
 }
 
+/** Compute a character's influence score: sum of trust + respect across all
+ * their relationships. Used for CHALLENGE_LEADERSHIP outcome resolution. */
+async function computeInfluence(db: Db, characterId: string): Promise<number> {
+  const rows = await db
+    .select({ trust: relationships.trust, respect: relationships.respect })
+    .from(relationships)
+    .where(
+      or(
+        eq(relationships.characterAId, characterId),
+        eq(relationships.characterBId, characterId)
+      )
+    );
+  return rows.reduce((sum, row) => sum + row.trust + row.respect, 0);
+}
+
+/** Simple djb2-style hash for a string — deterministic faction color selection. */
+function factionNameHash(s: string): number {
+  let hash = 5381;
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) + hash) ^ s.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+/** Curated palette of distinct faction colors that read well on a dark map. */
+const FACTION_COLORS = [
+  '#F2C14E', // gold
+  '#7FB2E5', // sky blue
+  '#6FBF9E', // sage green
+  '#E4A6D6', // orchid
+  '#F08B7E', // rose
+  '#9E9BE0', // lavender
+  '#7ECBC4', // teal
+  '#F5A667', // coral
+];
+
+/** Generate a faction name when the AI doesn't supply one via parameters.factionName. */
+function generateFactionName(leaderName: string): string {
+  const PREFIXES = [
+    'The', 'Order of', 'Brotherhood of', 'Circle of', 'League of', 'House of',
+  ];
+  const NOUNS = [
+    'Iron', 'Amber', 'Silver', 'Crimson', 'Gold', 'Shadow', 'Stone', 'Dawn',
+  ];
+  const SUFFIXES = [
+    'Accord', 'Alliance', 'Compact', 'Pact', 'Concord', 'Union', 'Guard', 'Circle',
+  ];
+  const h = factionNameHash(leaderName);
+  const prefix = PREFIXES[h % PREFIXES.length];
+  const noun = NOUNS[Math.floor(h / PREFIXES.length) % NOUNS.length];
+  const suffix = SUFFIXES[Math.floor(h / (PREFIXES.length * NOUNS.length)) % SUFFIXES.length];
+  return `${prefix} ${noun} ${suffix}`;
+}
+
 // A conversation caps at this many total messages before the engine
 // ends it deterministically — bounds token spend (every message is a
 // generateDialogue call) and gives conversations a natural close
@@ -660,6 +721,7 @@ interface ExecuteActionParams {
   state: { locationId: string; status: string };
   locations: LocationInfo[];
   cycleId: string;
+  gameDay: number;
   gameDayRealSeconds: number;
   characterNameById: Map<string, string>;
   conversationInfoById: Map<string, { participantIds: string[]; locationId: string | null }>;
@@ -676,6 +738,7 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
     state,
     locations,
     cycleId,
+    gameDay,
     gameDayRealSeconds,
     characterNameById,
     conversationInfoById,
@@ -1129,6 +1192,231 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
         targetCharacterId,
         locationId: state.locationId,
         payload: { effect: 'MONEY_GIVEN', before: effect.before, after: effect.after },
+        importance: 0.1,
+        createdAt: new Date(),
+      });
+      break;
+    }
+
+    case 'FORM_ALLIANCE': {
+      const targetCharacterId = decision.target_id;
+      if (!targetCharacterId) return;
+      const targetName = characterNameById.get(targetCharacterId) ?? 'someone';
+
+      const [actorStateRow] = await db
+        .select({ factionId: characterState.factionId })
+        .from(characterState)
+        .where(eq(characterState.characterId, characterId))
+        .limit(1);
+
+      let factionId: string;
+      let factionName: string;
+      let isNewFaction = false;
+
+      if (actorStateRow?.factionId) {
+        // Actor already leads or belongs to a faction — recruit the target into it.
+        factionId = actorStateRow.factionId;
+        const [existingFaction] = await db
+          .select({ name: factions.name })
+          .from(factions)
+          .where(eq(factions.id, factionId))
+          .limit(1);
+        factionName = existingFaction?.name ?? 'Unknown Faction';
+      } else {
+        // Found a brand-new faction with this character as its first leader.
+        isNewFaction = true;
+        factionName =
+          typeof decision.parameters?.factionName === 'string' && decision.parameters.factionName.length > 0
+            ? decision.parameters.factionName
+            : generateFactionName(actor.name);
+        const factionColor = FACTION_COLORS[factionNameHash(factionName) % FACTION_COLORS.length];
+
+        const [newFaction] = await db
+          .insert(factions)
+          .values({
+            name: factionName,
+            color: factionColor,
+            icon: 'shield',
+            foundedGameDay: gameDay,
+            leaderId: characterId,
+          })
+          .returning({ id: factions.id });
+        factionId = newFaction.id;
+
+        await db
+          .update(characterState)
+          .set({ factionId, factionRank: 'leader', updatedAt: new Date() })
+          .where(eq(characterState.characterId, characterId));
+      }
+
+      // Guard: skip if the target already belongs to a different faction to
+      // avoid silently overwriting rank and faction membership mid-game.
+      const [targetStateRow] = await db
+        .select({ factionId: characterState.factionId })
+        .from(characterState)
+        .where(eq(characterState.characterId, targetCharacterId))
+        .limit(1);
+
+      if (targetStateRow?.factionId && targetStateRow.factionId !== factionId) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          targetCharacterId,
+          locationId: state.locationId,
+          payload: {
+            action: 'FORM_ALLIANCE',
+            reason: `${targetName} already belongs to another faction`,
+          },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        return;
+      }
+
+      // Add target to faction as a member.
+      await db
+        .update(characterState)
+        .set({ factionId, factionRank: 'member', updatedAt: new Date() })
+        .where(eq(characterState.characterId, targetCharacterId));
+
+      await db.insert(gameEvents).values({
+        type: isNewFaction ? 'FACTION_FOUNDED' : 'FACTION_MEMBER_JOINED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: {
+          faction_id: factionId,
+          faction_name: factionName,
+          leader_name: actor.name,
+          member_name: targetName,
+          intent: decision.intent,
+        },
+        importance: isNewFaction ? 0.9 : 0.6,
+        createdAt: new Date(),
+      });
+
+      const allianceEffect = await applyRelationshipEffect(
+        db,
+        characterId,
+        targetCharacterId,
+        'ALLIANCE_FORMED'
+      );
+      await db.insert(gameEvents).values({
+        type: 'RELATIONSHIP_CHANGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: { effect: 'ALLIANCE_FORMED', before: allianceEffect.before, after: allianceEffect.after },
+        importance: 0.2,
+        createdAt: new Date(),
+      });
+      break;
+    }
+
+    case 'CHALLENGE_LEADERSHIP': {
+      const targetCharacterId = decision.target_id;
+      if (!targetCharacterId) return;
+      const targetName = characterNameById.get(targetCharacterId) ?? 'someone';
+
+      const [actorStateForChallenge] = await db
+        .select({ factionId: characterState.factionId, factionRank: characterState.factionRank })
+        .from(characterState)
+        .where(eq(characterState.characterId, characterId))
+        .limit(1);
+
+      if (!actorStateForChallenge?.factionId) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          locationId: state.locationId,
+          payload: { action: 'CHALLENGE_LEADERSHIP', reason: 'Not a member of any faction' },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        return;
+      }
+
+      const [targetStateForChallenge] = await db
+        .select({ factionId: characterState.factionId })
+        .from(characterState)
+        .where(eq(characterState.characterId, targetCharacterId))
+        .limit(1);
+
+      if (
+        !targetStateForChallenge?.factionId ||
+        targetStateForChallenge.factionId !== actorStateForChallenge.factionId
+      ) {
+        await db.insert(gameEvents).values({
+          type: 'ACTION_REJECTED',
+          actorCharacterId: characterId,
+          targetCharacterId,
+          locationId: state.locationId,
+          payload: { action: 'CHALLENGE_LEADERSHIP', reason: 'Target is not in the same faction' },
+          importance: 0.1,
+          createdAt: new Date(),
+        });
+        return;
+      }
+
+      const challengedFactionId = actorStateForChallenge.factionId;
+
+      // Influence = sum of trust + respect across all the character's relationships.
+      const actorInfluence = await computeInfluence(db, characterId);
+      const targetInfluence = await computeInfluence(db, targetCharacterId);
+      // On a tie the challenger wins: mounting a challenge itself demonstrates
+      // political will, and breaking ties in the challenger's favor creates
+      // more interesting emergent events than silently preserving the status quo.
+      const actorWins = actorInfluence >= targetInfluence;
+
+      if (actorWins) {
+        await db
+          .update(characterState)
+          .set({ factionRank: 'leader', updatedAt: new Date() })
+          .where(eq(characterState.characterId, characterId));
+        await db
+          .update(characterState)
+          .set({ factionRank: 'commander', updatedAt: new Date() })
+          .where(eq(characterState.characterId, targetCharacterId));
+        await db
+          .update(factions)
+          .set({ leaderId: characterId })
+          .where(eq(factions.id, challengedFactionId));
+      }
+
+      await db.insert(gameEvents).values({
+        type: 'LEADERSHIP_CHALLENGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: {
+          faction_id: challengedFactionId,
+          challenger_name: actor.name,
+          target_name: targetName,
+          challenger_influence: actorInfluence,
+          target_influence: targetInfluence,
+          outcome: actorWins ? 'challenger_wins' : 'leader_holds',
+          intent: decision.intent,
+        },
+        importance: 0.85,
+        createdAt: new Date(),
+      });
+
+      const challengeEffect = await applyRelationshipEffect(
+        db,
+        characterId,
+        targetCharacterId,
+        'LEADERSHIP_CHALLENGED'
+      );
+      await db.insert(gameEvents).values({
+        type: 'RELATIONSHIP_CHANGED',
+        actorCharacterId: characterId,
+        targetCharacterId,
+        locationId: state.locationId,
+        payload: {
+          effect: 'LEADERSHIP_CHALLENGED',
+          before: challengeEffect.before,
+          after: challengeEffect.after,
+        },
         importance: 0.1,
         createdAt: new Date(),
       });

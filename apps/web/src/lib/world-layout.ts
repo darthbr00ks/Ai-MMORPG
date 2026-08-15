@@ -15,7 +15,21 @@
 export interface WorldMapPoint {
   x: number;
   y: number;
+  /** Determines which SVG tile icon is rendered for this location node. */
+  type: LocationNodeType;
 }
+
+export type LocationNodeType =
+  | 'plaza'
+  | 'tavern'
+  | 'market'
+  | 'home'
+  | 'cityhall'
+  | 'warehouse'
+  | 'farm'
+  | 'bank'
+  | 'mine'
+  | 'guard';
 
 // Height has headroom below the lowest nodes (mine/guard-station at
 // y=620-630) for their name labels at LOCATION_LABEL_OFFSET_Y (78px) —
@@ -23,16 +37,16 @@ export interface WorldMapPoint {
 export const WORLD_MAP_VIEWBOX = { width: 1050, height: 740 } as const;
 
 export const LOCATION_LAYOUT: Record<string, WorldMapPoint> = {
-  'town-square': { x: 500, y: 330 },
-  tavern: { x: 250, y: 170 },
-  market: { x: 760, y: 170 },
-  'residential-district': { x: 250, y: 490 },
-  'city-hall': { x: 750, y: 490 },
-  'warehouse-district': { x: 950, y: 330 },
-  farm: { x: 950, y: 150 },
-  bank: { x: 950, y: 490 },
-  mine: { x: 950, y: 620 },
-  'guard-station': { x: 500, y: 630 },
+  'town-square':          { x: 500, y: 330, type: 'plaza' },
+  tavern:                 { x: 250, y: 170, type: 'tavern' },
+  market:                 { x: 760, y: 170, type: 'market' },
+  'residential-district': { x: 250, y: 490, type: 'home' },
+  'city-hall':            { x: 750, y: 490, type: 'cityhall' },
+  'warehouse-district':   { x: 950, y: 330, type: 'warehouse' },
+  farm:                   { x: 950, y: 150, type: 'farm' },
+  bank:                   { x: 950, y: 490, type: 'bank' },
+  mine:                   { x: 950, y: 620, type: 'mine' },
+  'guard-station':        { x: 500, y: 630, type: 'guard' },
 };
 
 /**

@@ -19,6 +19,10 @@ export interface WorldSnapshotCharacter {
   archetype: string;
   locationId: string;
   status: 'idle' | 'working' | 'traveling' | 'conversing' | 'sleeping' | 'planning';
+  factionId: string | null;
+  factionColor: string | null;
+  factionName: string | null;
+  factionRank: 'leader' | 'commander' | 'captain' | 'lieutenant' | 'member' | null;
 }
 
 export interface WorldSnapshot {
@@ -57,6 +61,10 @@ type CharacterRow = {
   archetype: string;
   locationId: string;
   status: WorldSnapshotCharacter['status'];
+  factionId: string | null;
+  factionRank: WorldSnapshotCharacter['factionRank'];
+  factionColor: string | null;
+  factionName: string | null;
 };
 
 async function loadWorldSnapshot(): Promise<WorldSnapshot> {
@@ -83,9 +91,14 @@ async function loadWorldSnapshot(): Promise<WorldSnapshot> {
       archetype: schema.characters.archetype,
       locationId: schema.characterState.locationId,
       status: schema.characterState.status,
+      factionId: schema.characterState.factionId,
+      factionRank: schema.characterState.factionRank,
+      factionColor: schema.factions.color,
+      factionName: schema.factions.name,
     })
     .from(schema.characters)
-    .innerJoin(schema.characterState, eq(schema.characters.id, schema.characterState.characterId));
+    .innerJoin(schema.characterState, eq(schema.characters.id, schema.characterState.characterId))
+    .leftJoin(schema.factions, eq(schema.characterState.factionId, schema.factions.id));
 
   const [locationRows, characterRows] = await Promise.all([locationRowsPromise, characterRowsPromise]);
 
@@ -107,6 +120,10 @@ async function loadWorldSnapshot(): Promise<WorldSnapshot> {
         archetype: c.archetype,
         locationId: c.locationId,
         status: c.status,
+        factionId: c.factionId ?? null,
+        factionColor: c.factionColor ?? null,
+        factionName: c.factionName ?? null,
+        factionRank: c.factionRank ?? null,
       })),
   };
 }

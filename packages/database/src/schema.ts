@@ -32,6 +32,14 @@ export const characterStatusEnum = pgEnum('character_status', [
   'planning',
 ]);
 
+export const factionRankEnum = pgEnum('faction_rank', [
+  'leader',
+  'commander',
+  'captain',
+  'lieutenant',
+  'member',
+]);
+
 export const moderationOutcomeEnum = pgEnum('moderation_outcome', [
   'accepted',
   'rejected',
@@ -159,6 +167,12 @@ export const characterState = pgTable('character_state', {
   travelDestinationId: uuid('travel_destination_id').references(
     () => locations.id
   ),
+  // Faction membership — nullable (no faction = no row in factions table).
+  // Stored on characterState rather than characters to avoid the circular
+  // FK that would arise from characters.factionId → factions and
+  // factions.leaderId → characters (both declared in the same schema file).
+  factionId: uuid('faction_id').references(() => factions.id),
+  factionRank: factionRankEnum('faction_rank'),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
@@ -324,6 +338,22 @@ export const relationships = pgTable('relationships', {
   hostility: integer('hostility').notNull().default(0),
   familiarity: integer('familiarity').notNull().default(0),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Factions — alliances of characters who have chosen to act together.
+// FK to characters is one-way (leaderId → characters) to avoid a circular
+// dependency with characterState.factionId → factions. leaderId is nullable
+// at insert time because the faction row must exist before its members'
+// characterState rows can reference it; it is always set immediately after
+// the founding INSERT in tick-processor.ts.
+export const factions = pgTable('factions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  color: text('color').notNull(),
+  icon: text('icon').notNull().default('shield'),
+  foundedGameDay: integer('founded_game_day').notNull().default(0),
+  leaderId: uuid('leader_id').references(() => characters.id),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
 export const conversations = pgTable('conversations', {

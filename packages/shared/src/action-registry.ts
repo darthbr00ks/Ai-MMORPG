@@ -10,6 +10,8 @@ export const ACTION_NAMES = [
   'SELL_ITEM',
   'GIVE_ITEM',
   'TRANSFER_MONEY',
+  'FORM_ALLIANCE',
+  'CHALLENGE_LEADERSHIP',
 ] as const;
 
 export type ActionName = (typeof ACTION_NAMES)[number];
@@ -81,6 +83,20 @@ export const ACTION_REGISTRY: ActionDefinition[] = [
       'Give money from your wallet to another character visible at your current location. target_id must be that character\'s id; parameters.amountCents is how much.',
     requiresTarget: true,
     parameters: ['amountCents'],
+  },
+  {
+    name: 'FORM_ALLIANCE',
+    description:
+      'Invite a character visible at your current location to join or found a faction together. target_id must be that character\'s id. If you already lead a faction, the target joins it; otherwise a new faction is created with you as its first leader. parameters.factionName (optional) names a new faction.',
+    requiresTarget: true,
+    parameters: ['factionName'],
+  },
+  {
+    name: 'CHALLENGE_LEADERSHIP',
+    description:
+      'Challenge the current leader of your faction for control. target_id must be the leader\'s character id. The character with the highest combined trust+respect score among faction members wins. Can only be used while you are already a member of a faction.',
+    requiresTarget: true,
+    parameters: [],
   },
 ];
 
