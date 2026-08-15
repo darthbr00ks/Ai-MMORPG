@@ -10,7 +10,15 @@ import type {
   MemoryResult,
   ModerationResult,
   AiCallUsage,
+  AvailableMarketItem,
 } from '@ai-world/shared';
+
+// At/above this, BUY_ITEM should reach for food specifically rather
+// than whatever's first in the catalog — well below tick-processor.ts's
+// STARVATION_HUNGER_THRESHOLD (80), matching the doc's "increasingly
+// motivated to acquire food" framing: act before it becomes a crisis,
+// not once health is already draining.
+const HUNGRY_THRESHOLD = 50;
 
 const ZERO_USAGE: AiCallUsage = {
   inputTokens: 0,
@@ -39,6 +47,23 @@ function pickMoveDestination(
     return 'town-square';
   }
   return connectedLocationSlugs.find((slug) => slug !== currentLocationSlug) ?? null;
+}
+
+/**
+ * Which market item BUY_ITEM should target — food specifically when
+ * hunger is a real concern (falling back to the catalog's first entry
+ * if nothing food-category is on offer), the catalog's first entry
+ * otherwise. Recomputed wherever it's needed (decision-branch intent
+ * text, then again in the BUY_ITEM result block) rather than threaded
+ * through as extra state — same style as pickMoveDestination/MOVE
+ * above.
+ */
+function pickBuyItem(hunger: number, availableMarketItems: AvailableMarketItem[]): AvailableMarketItem {
+  if (hunger >= HUNGRY_THRESHOLD) {
+    const food = availableMarketItems.find((i) => i.category === 'food');
+    if (food) return food;
+  }
+  return availableMarketItems[0];
 }
 
 /**
@@ -115,14 +140,35 @@ export class MockProvider implements AgentModelProvider {
       action = 'WORK';
       goal = 'earn more money';
       intent = 'Working to secure financial stability';
+    } else if (ctx.currentLocation === 'market' && ctx.inventory.some((i) => i.quantity > 0)) {
+      // Comfortably wealthy and standing at the one place SELL_ITEM is
+      // legal, already holding stock — cash it in before considering a
+      // fresh purchase below. Only ever fires against ctx.inventory
+      // (never a guessed id), the same real-holdings grounding
+      // AgentDecisionContext.inventory exists to provide — see its
+      // doc comment and the regression test this mirrors from the
+      // connectedLocationSlugs/MOVE fix.
+      action = 'SELL_ITEM';
+      goal = 'convert surplus goods into coin';
+      intent = `Selling ${ctx.inventory.find((i) => i.quantity > 0)!.name.toLowerCase()} at the market`;
     } else if (ctx.currentLocation === 'market' && ctx.availableMarketItems.length > 0) {
       // Comfortably wealthy (the wallet < 5000 branch above didn't
-      // fire) and standing at the one place BUY_ITEM is legal —
-      // exercises the Phase 12 economy actions in dev/tests without a
-      // separate modulo-cadence gate like the social loop above.
+      // fire), nothing to sell, and standing at the one place BUY_ITEM
+      // is legal — exercises the Phase 12 economy actions in dev/tests
+      // without a separate modulo-cadence gate like the social loop
+      // above.
       action = 'BUY_ITEM';
-      goal = 'stock up on supplies';
-      intent = `Buying ${ctx.availableMarketItems[0].name.toLowerCase()} at the market`;
+      const buyTarget = pickBuyItem(ctx.hunger, ctx.availableMarketItems);
+      goal = ctx.hunger >= HUNGRY_THRESHOLD ? 'find food before hunger becomes a real problem' : 'stock up on supplies';
+      intent = `Buying ${buyTarget.name.toLowerCase()} at the market`;
+    } else if (ctx.inventory.some((i) => i.quantity > 0) && ctx.visibleCharacters.length > 0) {
+      // Holding stock somewhere other than the market, with someone to
+      // give it to — GIVE_ITEM never had a branch at all before this,
+      // so it was permanently dead code under MockProvider regardless
+      // of what the model could see.
+      action = 'GIVE_ITEM';
+      goal = 'strengthen a bond through generosity';
+      intent = `Giving ${ctx.inventory.find((i) => i.quantity > 0)!.name.toLowerCase()} to ${ctx.visibleCharacters[0].name}`;
     }
 
     if (action === 'MOVE') {
@@ -151,14 +197,44 @@ export class MockProvider implements AgentModelProvider {
     }
 
     if (action === 'BUY_ITEM') {
-      const item = ctx.availableMarketItems[0];
+      const item = pickBuyItem(ctx.hunger, ctx.availableMarketItems);
       return {
         goal,
         selected_action: 'BUY_ITEM',
         target_id: item.itemId,
         parameters: { quantity: 1 },
         intent,
+        priority: ctx.hunger >= HUNGRY_THRESHOLD ? 0.7 : 0.4,
+      };
+    }
+
+    if (action === 'SELL_ITEM') {
+      // Sell one unit, never more than held — action-validator.ts only
+      // checks the item id exists in the world's global catalog, not
+      // that this character has enough of it, so a quantity from
+      // anywhere but ctx.inventory's own reported amount would be a
+      // guess (see InventoryItemSummary's doc comment).
+      const holding = ctx.inventory.find((i) => i.quantity > 0)!;
+      return {
+        goal,
+        selected_action: 'SELL_ITEM',
+        target_id: holding.itemId,
+        parameters: { quantity: 1 },
+        intent,
         priority: 0.4,
+      };
+    }
+
+    if (action === 'GIVE_ITEM') {
+      const holding = ctx.inventory.find((i) => i.quantity > 0)!;
+      const recipient = ctx.visibleCharacters[0];
+      return {
+        goal,
+        selected_action: 'GIVE_ITEM',
+        target_id: recipient.characterId,
+        parameters: { itemId: holding.itemId, quantity: 1 },
+        intent,
+        priority: 0.45,
       };
     }
 

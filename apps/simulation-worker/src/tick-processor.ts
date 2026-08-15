@@ -1,4 +1,4 @@
-import { eq, and, isNull, inArray, desc, or } from 'drizzle-orm';
+import { eq, and, isNull, inArray, desc, or, gte } from 'drizzle-orm';
 import type { Db } from '@ai-world/database';
 import {
   characters,
@@ -17,6 +17,7 @@ import {
   items,
   factions,
   relationships,
+  inventory,
 } from '@ai-world/database';
 import type { AgentModelProvider } from '@ai-world/ai';
 import {
@@ -27,15 +28,17 @@ import {
   addToInventory,
   removeFromInventory,
 } from '@ai-world/game-engine';
-import { creditWallet, debitWallet, transferMoney } from '@ai-world/game-engine';
+import { creditWallet, debitWallet, transferMoney, calculateMarketPrice } from '@ai-world/game-engine';
 import { extractDailyMemories } from './memory-extraction.js';
 import { generateDailyReports } from './daily-report.js';
+import { applyDailyMetabolism } from './metabolism.js';
 import type {
   AgentDecision,
   AgentDecisionContext,
   ActiveConversationSummary,
   VisibleCharacter,
   AvailableMarketItem,
+  InventoryItemSummary,
 } from '@ai-world/shared';
 import { AgentDecisionSchema } from '@ai-world/shared';
 import { gameTimeNow } from '@ai-world/shared';
@@ -120,6 +123,12 @@ export async function processTick(
         config.gameDayRealSeconds
       );
       errors.push(...reportResult.errors.map((e) => `[daily-report] ${e}`));
+
+      // Same once-per-day hook — hunger is a slow, day-granularity
+      // need (economy-phase-1's §5), not something that should tick
+      // every SIMULATION_TICK_SECONDS.
+      const metabolismResult = await applyDailyMetabolism(db);
+      errors.push(...metabolismResult.errors.map((e) => `[metabolism] ${e}`));
     }
   }
 
@@ -159,11 +168,77 @@ export async function processTick(
   const marketCatalog = await db.select().from(items);
   const itemIds = marketCatalog.map((i) => i.id);
   const itemById = new Map(marketCatalog.map((i) => [i.id, i]));
+
+  // Dynamic pricing (economy-phase-1 — see market-pricing.ts's doc
+  // comment): one game-day's worth of real trading pressure per item,
+  // read straight from the existing ITEM_PURCHASED/ITEM_SOLD game_events
+  // rather than a new location-inventory table. A real JS Date cutoff,
+  // not a raw SQL `now() - interval` — see docs/architecture.md's Live
+  // Validation Pass section for exactly why that distinction mattered
+  // here before (a psql-session-timezone trap that never affected the
+  // app itself, since the app always compares real Date objects).
+  const pricingWindowCutoff = new Date(Date.now() - config.gameDayRealSeconds * 1000);
+  const recentTradeEvents =
+    itemIds.length > 0
+      ? await db
+          .select({ type: gameEvents.type, payload: gameEvents.payload })
+          .from(gameEvents)
+          .where(
+            and(
+              inArray(gameEvents.type, ['ITEM_PURCHASED', 'ITEM_SOLD']),
+              gte(gameEvents.createdAt, pricingWindowCutoff)
+            )
+          )
+      : [];
+  const recentPurchaseCountByItemId = new Map<string, number>();
+  const recentSaleCountByItemId = new Map<string, number>();
+  for (const event of recentTradeEvents) {
+    const itemId = (event.payload as Record<string, unknown> | null)?.item_id as string | undefined;
+    if (!itemId) continue;
+    const counts = event.type === 'ITEM_PURCHASED' ? recentPurchaseCountByItemId : recentSaleCountByItemId;
+    counts.set(itemId, (counts.get(itemId) ?? 0) + 1);
+  }
+  const currentPriceByItemId = new Map<string, number>(
+    marketCatalog.map((i) => [
+      i.id,
+      calculateMarketPrice(
+        i.basePriceCents,
+        recentPurchaseCountByItemId.get(i.id) ?? 0,
+        recentSaleCountByItemId.get(i.id) ?? 0
+      ),
+    ])
+  );
+
   const availableMarketItems: AvailableMarketItem[] = marketCatalog.map((i) => ({
     itemId: i.id,
     name: i.name,
+    category: i.category,
     basePriceCents: i.basePriceCents,
+    currentPriceCents: currentPriceByItemId.get(i.id) ?? i.basePriceCents,
   }));
+
+  // Every character's own holdings — the ONLY items SELL_ITEM/GIVE_ITEM
+  // can reference without a wasted, blind-guess ACTION_REJECTED (see
+  // InventoryItemSummary's doc comment). One query for the whole world,
+  // same batching rationale as everything else in this section — 20+
+  // characters would otherwise mean 20+ extra round trips.
+  const allInventoryRows = await db
+    .select({
+      characterId: inventory.characterId,
+      itemId: inventory.itemId,
+      quantity: inventory.quantity,
+    })
+    .from(inventory);
+
+  const inventoryByCharacterId = new Map<string, InventoryItemSummary[]>();
+  for (const row of allInventoryRows) {
+    if (row.quantity <= 0) continue; // a fully sold/given-away item — nothing to offer
+    const item = itemById.get(row.itemId);
+    if (!item) continue; // orphaned row referencing a deleted item — nothing to show
+    const list = inventoryByCharacterId.get(row.characterId) ?? [];
+    list.push({ itemId: row.itemId, name: item.name, quantity: row.quantity });
+    inventoryByCharacterId.set(row.characterId, list);
+  }
 
   // --- Conversation visibility & context (§5, §10) ---------------------
   // Batch-loaded once per tick rather than per character: with 20+
@@ -399,6 +474,7 @@ export async function processTick(
         connectedLocationSlugs: (currentLocation?.connections as string[] | undefined) ?? [],
         health: currentState.health,
         fatigue: currentState.fatigue,
+        hunger: currentState.hunger,
         status: currentState.status,
         walletCents: wallet?.balanceCents || 0,
         currentGoals: (char.ambitions as string[]) || [],
@@ -419,6 +495,7 @@ export async function processTick(
         visibleCharacters,
         activeConversations,
         availableMarketItems,
+        inventory: inventoryByCharacterId.get(char.id) ?? [],
         gameCycleId: cycleId,
         gameDay: gameTime.day,
       };
@@ -565,6 +642,7 @@ export async function processTick(
           conversationInfoById,
           conversationMessageCounts,
           itemById,
+          currentPriceByItemId,
         });
       } else {
         // Write rejected event
@@ -727,6 +805,12 @@ interface ExecuteActionParams {
   conversationInfoById: Map<string, { participantIds: string[]; locationId: string | null }>;
   conversationMessageCounts: Map<string, number>;
   itemById: Map<string, MarketItemRow>;
+  // What BUY_ITEM/SELL_ITEM actually charge THIS tick — see
+  // AvailableMarketItem.currentPriceCents's doc comment. Falls back to
+  // itemById's basePriceCents for any item this map somehow doesn't
+  // cover (it's built from the same marketCatalog, so in practice it
+  // always does — the fallback is defensive, not an expected path).
+  currentPriceByItemId: Map<string, number>;
 }
 
 async function executeAction(params: ExecuteActionParams): Promise<void> {
@@ -744,6 +828,7 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
     conversationInfoById,
     conversationMessageCounts,
     itemById,
+    currentPriceByItemId,
   } = params;
   const characterId = actor.id;
 
@@ -1020,7 +1105,13 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
       const quantity = decision.parameters?.quantity;
       if (!item || typeof quantity !== 'number' || quantity <= 0) return;
 
-      const totalCostCents = item.basePriceCents * Math.floor(quantity);
+      // The dynamic price computed once at the top of this tick — see
+      // AvailableMarketItem.currentPriceCents's doc comment. Same value
+      // this character's decision context showed them this tick, so
+      // there's no window where what they were quoted differs from
+      // what they're actually charged.
+      const unitPriceCents = currentPriceByItemId.get(item.id) ?? item.basePriceCents;
+      const totalCostCents = unitPriceCents * Math.floor(quantity);
       const debit = await debitWallet(db, characterId, totalCostCents, `Bought ${quantity}x ${item.name}`);
 
       if (!debit.success) {
@@ -1073,8 +1164,9 @@ async function executeAction(params: ExecuteActionParams): Promise<void> {
         break;
       }
 
-      const totalSaleCents = Math.floor(item.basePriceCents * MARKET_SELL_MULTIPLIER) * Math.floor(quantity);
-      await creditWallet(db, characterId, totalSaleCents, `Sold ${quantity}x ${item.name}`);
+      const unitPriceCents = currentPriceByItemId.get(item.id) ?? item.basePriceCents;
+      const totalSaleCents = Math.floor(unitPriceCents * MARKET_SELL_MULTIPLIER) * Math.floor(quantity);
+      await creditWallet(db, characterId, totalSaleCents, `Sold ${quantity}x ${item.name}`, 'sale');
 
       await db.insert(gameEvents).values({
         type: 'ITEM_SOLD',
