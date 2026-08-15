@@ -130,7 +130,7 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function hashString(input: string) {
+export function hashString(input: string) {
   let hash = 0;
   for (let i = 0; i < input.length; i++) {
     hash = (hash << 5) - hash + input.charCodeAt(i);
@@ -395,4 +395,19 @@ export function getConversationMeetingSpots(
     },
     center,
   };
+}
+
+const PATH_CACHE = new Map<string, WorldPoint[]>();
+
+export function getCachedWorldPath(start: WorldPoint, end: WorldPoint) {
+  const startTile = worldPointToTile(start);
+  const endTile = worldPointToTile(end);
+  const key = `${startTile.x},${startTile.y}->${endTile.x},${endTile.y}`;
+  const cached = PATH_CACHE.get(key);
+  if (cached) {
+    return cached;
+  }
+  const path = findWorldPath(start, end);
+  PATH_CACHE.set(key, path);
+  return path;
 }

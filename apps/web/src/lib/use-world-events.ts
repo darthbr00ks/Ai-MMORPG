@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 export interface WorldStreamEvent {
   id: string;
@@ -18,12 +18,18 @@ export interface WorldStreamEvent {
 }
 
 export function useWorldEvents(onEvent: (event: WorldStreamEvent) => void) {
+  const onEventRef = useRef(onEvent);
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
+
   useEffect(() => {
     const evtSource = new EventSource('/api/events/stream');
 
     evtSource.onmessage = (event) => {
       try {
-        onEvent(JSON.parse(event.data) as WorldStreamEvent);
+        onEventRef.current(JSON.parse(event.data) as WorldStreamEvent);
       } catch {
         // ignore parse errors
       }
@@ -32,5 +38,5 @@ export function useWorldEvents(onEvent: (event: WorldStreamEvent) => void) {
     return () => {
       evtSource.close();
     };
-  }, [onEvent]);
+  }, []);
 }

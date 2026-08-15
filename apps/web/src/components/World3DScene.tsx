@@ -10,9 +10,10 @@ import {
   ROAD_SEGMENTS,
   WORLD_TILE_SIZE,
   buildWorldTiles,
-  findWorldPath,
+  getCachedWorldPath,
   getConversationMeetingSpots,
   getLocationCharacterSpot,
+  hashString,
   type SceneLocationLayout,
   type WorldPoint,
 } from '@/lib/world-scene-layout';
@@ -72,15 +73,6 @@ const TUNIC_PALETTE = [
   '#8a3b4b',
   '#7b7a37',
 ] as const;
-
-function hashString(input: string) {
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash << 5) - hash + input.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
 
 function lerpPoint(a: WorldPoint, b: WorldPoint, t: number): WorldPoint {
   return {
@@ -811,7 +803,7 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
           const fromAnchor = LOCATION_SCENE_LAYOUT[fromSlug]?.characterAnchor;
           const toAnchor = LOCATION_SCENE_LAYOUT[toSlug]?.characterAnchor;
           if (fromAnchor && toAnchor) {
-            const path = findWorldPath(fromAnchor, toAnchor);
+            const path = getCachedWorldPath(fromAnchor, toAnchor);
             const progress = THREE.MathUtils.clamp(
               (now - travelPlan.startedAtMs) /
                 Math.max(travelPlan.etaMs - travelPlan.startedAtMs, 1),
@@ -866,6 +858,7 @@ export default function World3DScene({ snapshot }: { snapshot: WorldSnapshot }) 
         </div>
 
         <Canvas
+          shadows
           camera={{ position: [20, 24, 24], fov: 42 }}
           onPointerMissed={() => {
             setSelectedCharacterId(null);
