@@ -61,7 +61,7 @@ jobs:
       # in this suite runs against, same as local dev without live AI
       # explicitly opted into.
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/ai_world_ci
-      AUTH_SECRET: ci-placeholder-not-a-real-secret
+      AUTH_SECRET: ${{ secrets.CI_AUTH_SECRET != '' && secrets.CI_AUTH_SECRET || 'ci-placeholder-not-a-real-secret' }}
       GAME_DAY_REAL_SECONDS: '300'
       SIMULATION_TICK_SECONDS: '10'
       DIRECTIVE_MAX_CHARACTERS: '500'
