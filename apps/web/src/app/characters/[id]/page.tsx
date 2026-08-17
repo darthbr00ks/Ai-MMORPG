@@ -1,6 +1,7 @@
 import { getDb } from '@/lib/db';
+import { auth } from '@/lib/auth';
 import { schema } from '@ai-world/database';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, and } from 'drizzle-orm';
 import DirectiveForm from '@/components/DirectiveForm';
 import { CharacterAvatar } from '@/components/CharacterAvatar';
 
@@ -31,6 +32,21 @@ async function getCharacter(id: string) {
     .where(eq(schema.characters.id, id))
     .limit(1);
   return char;
+}
+
+async function checkOwnership(characterId: string, userId: string): Promise<boolean> {
+  const rows = await getDb()
+    .select()
+    .from(schema.characterOwnership)
+    .where(
+      and(
+        eq(schema.characterOwnership.characterId, characterId),
+        eq(schema.characterOwnership.userId, userId),
+        eq(schema.characterOwnership.active, true)
+      )
+    )
+    .limit(1);
+  return rows.length > 0;
 }
 
 async function getDirectiveHistory(characterId: string) {
@@ -87,13 +103,23 @@ export default async function CharacterDetailPage({
 }: {
   params: { id: string };
 }) {
+  const session = await auth();
   const char = await getCharacter(params.id);
   if (!char) {
     return <div className="text-red-400">Character not found</div>;
   }
 
+  // Directive history is owner-only (§52 private/public split).
+  // Wallet balance and raw health/fatigue stats are also owner-only.
+  const isOwner =
+    session?.user?.id
+      ? await checkOwnership(params.id, session.user.id as string)
+      : false;
+
   const [directiveHistory, recentDecisions, recentDailyReports] = await Promise.all([
-    getDirectiveHistory(params.id) as Promise<Directive[]>,
+    isOwner
+      ? (getDirectiveHistory(params.id) as Promise<Directive[]>)
+      : Promise.resolve([] as Directive[]),
     getRecentDecisions(params.id) as Promise<Decision[]>,
     getRecentDailyReports(params.id) as Promise<DailyReport[]>,
   ]);
@@ -132,18 +158,22 @@ export default async function CharacterDetailPage({
               <dt className="text-gray-400">Location</dt>
               <dd>{char.locationName ?? 'Unknown'}</dd>
             </div>
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Health</dt>
-              <dd>{char.health ?? 'N/A'}/100</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Fatigue</dt>
-              <dd>{char.fatigue ?? 'N/A'}/100</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-gray-400">Wallet</dt>
-              <dd>{((char.walletCents ?? 0) / 100).toFixed(2)} gold</dd>
-            </div>
+            {isOwner && (
+              <>
+                <div className="flex justify-between">
+                  <dt className="text-gray-400">Health</dt>
+                  <dd>{char.health ?? 'N/A'}/100</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-gray-400">Fatigue</dt>
+                  <dd>{char.fatigue ?? 'N/A'}/100</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-gray-400">Wallet</dt>
+                  <dd>{((char.walletCents ?? 0) / 100).toFixed(2)} gold</dd>
+                </div>
+              </>
+            )}
           </dl>
         </div>
 
@@ -181,7 +211,7 @@ export default async function CharacterDetailPage({
         )}
       </div>
 
-      <DirectiveForm characterId={params.id} />
+      {isOwner && <DirectiveForm characterId={params.id} />}
 
       {recentDailyReports.length > 0 && (
         <div className="bg-gray-900 rounded-lg p-4 border border-gray-800">
